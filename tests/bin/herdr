@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Test-only herdr stub. Drop into PATH ahead of the real herdr to isolate tests.
+# State directory: $WT_HERDR_STATE (must be set; tests provide it).
+# Failure-injection knobs (env):
+#   WT_HERDR_DOWN=1          → all commands return non-zero (simulates server down)
+#   WT_HERDR_FAIL_CREATE=1   → `tab create` fails
+#   WT_HERDR_FAIL_CLOSE=1    → `tab close` fails
+
+set -e
+
+state="${WT_HERDR_STATE:-}"
+[[ -z "$state" ]] && { echo "stub: WT_HERDR_STATE not set" >&2; exit 99; }
+mkdir -p "$state"
+ws_file="$state/workspaces.tsv"     # ws_id<TAB>label
+tab_file="$state/tabs.tsv"          # tab_id<TAB>ws_id<TAB>label<TAB>cwd<TAB>agent_status
+touch "$ws_file" "$tab_file"
+
+if [[ "${WT_HERDR_DOWN:-}" == "1" ]]; then
+  echo "stub: herdr server down" >&2
+  exit 1
+fi
+
+# Parse flags out of "$@", capture --workspace, --cwd, --label, --focus/--no-focus
+parse_kv() {
+  ws=""; cwd=""; label=""
+  while (($#)); do
+    case "$1" in
+      --workspace) ws="$2"; shift 2 ;;
+      --cwd) cwd="$2"; shift 2 ;;
+      --label) label="$2"; shift 2 ;;
+      --focus|--no-focus) shift ;;
+      *) POSARGS+=("$1"); shift ;;
+    esac
+  done
+}
+
+next_id() { printf 'w%s_%s' "$RANDOM" "$$"; }
+next_tabid() { local ws="$1"; local n=$(($(awk -v w="$ws" '$2==w' "$tab_file" | wc -l) + 1)); printf '%s:%d' "$ws" "$n"; }
+
+cmd="${1:-}"; shift || true
+sub="${1:-}"; [[ -n "$sub" ]] && shift || true
+
+case "$cmd:$sub" in
+  status:server)
+    echo "status: running"
+    echo "version: stub"
+    ;;
+  --version:*) echo "herdr stub" ;;
+  workspace:list)
+    out='{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":['
+    sep=""
+    while IFS=$'\t' read -r id label; do
+      [[ -z "$id" ]] && continue
+      out+="$sep{\"workspace_id\":\"$id\",\"label\":\"$label\",\"focused\":false,\"agent_status\":\"unknown\",\"pane_count\":0,\"tab_count\":0,\"active_tab_id\":\"\",\"number\":1}"
+      sep=","
+    done < "$ws_file"
+    out+=']}}'
+    echo "$out"
+    ;;
+  workspace:create)
+    POSARGS=(); parse_kv "$@"
+    id=$(next_id)
+    printf '%s\t%s\n' "$id" "$label" >> "$ws_file"
+    echo "{\"id\":\"cli:workspace:create\",\"result\":{\"workspace_id\":\"$id\"}}"
+    ;;
+  tab:list)
+    POSARGS=(); parse_kv "$@"
+    out='{"id":"cli:tab:list","result":{"type":"tab_list","tabs":['
+    sep=""
+    while IFS=$'\t' read -r tab_id w l cwd agent; do
+      [[ -z "$tab_id" ]] && continue
+      [[ -n "$ws" && "$w" != "$ws" ]] && continue
+      out+="$sep{\"tab_id\":\"$tab_id\",\"workspace_id\":\"$w\",\"label\":\"$l\",\"agent_status\":\"${agent:-unknown}\",\"pane_count\":1,\"focused\":false,\"number\":1}"
+      sep=","
+    done < "$tab_file"
+    out+=']}}'
+    echo "$out"
+    ;;
+  tab:create)
+    if [[ "${WT_HERDR_FAIL_CREATE:-}" == "1" ]]; then
+      echo '{"error":{"code":"stub_fail","message":"stub: forced failure"}}' >&2
+      exit 1
+    fi
+    POSARGS=(); parse_kv "$@"
+    [[ -n "$ws" && -n "$cwd" ]] || { echo "stub: tab create needs --workspace and --cwd" >&2; exit 1; }
+    tab_id=$(next_tabid "$ws")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$tab_id" "$ws" "$label" "$cwd" "unknown" >> "$tab_file"
+    echo "{\"id\":\"cli:tab:create\",\"result\":{\"tab\":{\"tab_id\":\"$tab_id\",\"workspace_id\":\"$ws\",\"label\":\"$label\"}}}"
+    ;;
+  tab:close)
+    if [[ "${WT_HERDR_FAIL_CLOSE:-}" == "1" ]]; then
+      echo '{"error":{"code":"stub_fail","message":"forced"}}' >&2
+      exit 1
+    fi
+    target="${1:-}"
+    if [[ -z "$target" ]]; then echo "stub: tab close needs id" >&2; exit 1; fi
+    tmp=$(mktemp)
+    awk -v t="$target" -F'\t' '$1 != t' "$tab_file" > "$tmp"
+    mv "$tmp" "$tab_file"
+    echo "{\"id\":\"cli:tab:close\",\"result\":{\"type\":\"ok\"}}"
+    ;;
+  tab:focus)
+    echo "{\"id\":\"cli:tab:focus\",\"result\":{\"type\":\"ok\"}}"
+    ;;
+  pane:list)
+    POSARGS=(); parse_kv "$@"
+    out='{"id":"cli:pane:list","result":{"type":"pane_list","panes":['
+    sep=""
+    n=0
+    while IFS=$'\t' read -r tab_id w l cwd agent; do
+      [[ -z "$tab_id" ]] && continue
+      [[ -n "$ws" && "$w" != "$ws" ]] && continue
+      n=$((n+1))
+      out+="$sep{\"pane_id\":\"$w-$n\",\"tab_id\":\"$tab_id\",\"workspace_id\":\"$w\",\"cwd\":\"$cwd\",\"agent_status\":\"${agent:-unknown}\",\"focused\":false,\"revision\":0,\"terminal_id\":\"term_stub\"}"
+      sep=","
+    done < "$tab_file"
+    out+=']}}'
+    echo "$out"
+    ;;
+  *)
+    echo "stub: unhandled command: $cmd $sub $*" >&2
+    exit 2
+    ;;
+esac

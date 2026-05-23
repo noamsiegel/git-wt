@@ -1,0 +1,131 @@
+# wt
+
+> Parallel-safe git worktree CLI for agentic coding sessions.
+
+`wt` is a tiny, opinionated tool that lets you run multiple AI coding sessions
+(Claude Code, Cursor, OMP, plain shells) against the same repository **at the
+same time** without conflicts. It does this by enforcing one simple rule:
+
+> The canonical checkout is a parking spot.
+> All real work happens in worktrees.
+
+Each worktree is isolated, gets its own herdr tab, and is auto-pushed to its
+own private branch on every commit — so work never gets trapped on local
+disk when an agent crashes or you switch contexts.
+
+## Why this exists
+
+Running multiple AI coding agents in parallel against one repo creates three
+predictable failure modes:
+
+1. **Concurrent edits to the same files.** Two agents modify `src/auth.ts`
+   simultaneously. Resolution is manual, error-prone, and breaks the agents'
+   mental models.
+2. **Dirty canonical checkouts.** Agent A leaves uncommitted changes in
+   `main`. Agent B's `git pull` fails. Or worse, one of them rebases and
+   destroys the other's WIP.
+3. **Local-only branches that never reach the remote.** Agent finishes a
+   feature, you tab away, agent crashes — and the branch lives only on your
+   laptop until a backup runs (if one ever does).
+
+`wt` makes (1) impossible by giving each session its own worktree, (2)
+impossible by structurally refusing commits in canonical, and (3) impossible
+by autopushing every commit to a private remote branch immediately.
+
+## Mental model
+
+| Layer | Path | Discipline |
+|---|---|---|
+| Canonical checkout | `repos.<name>.path` | Always on `main`. Never edited. A parking spot. |
+| Worktrees | `repos.<name>.worktree_root/<id>` | All real work. One per active branch. |
+| Herdr tabs | One per worktree | Visible anchor for switching between sessions. |
+
+`wt new <id>` creates a worktree, branches from `origin/main`, opens a herdr
+tab. `wt reap <id>` cleans it up when you're done.
+
+## Installation
+
+Requires bash >= 4, git >= 2.43, [yq](https://github.com/mikefarah/yq)
+(Go fork), [herdr](https://github.com/noamsiegel/herdr), and `realpath`.
+
+```bash
+brew install bash yq herdr
+git clone https://github.com/noamsiegel/git-wt.git ~/.local/share/git-wt
+# Install as `git-wt` so it's invokable as `git wt`.
+ln -s ~/.local/share/git-wt/git-wt ~/.local/bin/git-wt
+# Convenience alias:
+ln -s ~/.local/share/git-wt/git-wt ~/.local/bin/wt
+```
+
+Then bootstrap with `wt init` to install global git hooks at
+`~/.config/git/hooks/` and create the config at `~/.config/wt/config.yaml`.
+
+## Usage
+
+```bash
+wt new noam/AUTH-123-add-sso     # new worktree off origin/main, herdr tab
+wt list                           # all active worktrees
+wt cd AUTH-123                    # print absolute worktree path
+wt adopt feature/wip              # move an existing branch into a worktree
+wt reap AUTH-123                  # clean up worktree, remove branch
+wt doctor                         # diagnose setup, dependencies, hook wiring
+```
+
+## Configuration
+
+```yaml
+# ~/.config/wt/config.yaml
+defaults:
+  default_branch: main
+  herdr_workspace: code
+
+repos:
+  my-monorepo:
+    path: ~/code/my-monorepo
+    worktree_root: ~/code/worktrees/my-monorepo
+    base: main
+    branch_patterns:
+      - '^(yourname)/[A-Z]+-[0-9]+-[a-z0-9-]+$'
+      - '^pr-[0-9]+$'
+
+  other-repo:
+    path: ~/code/other
+    worktree_root: ~/code/worktrees/other
+    base: main
+```
+
+## Hook chain
+
+`wt` installs four real git hooks at `~/.config/git/hooks/` plus a generic
+dispatcher (`_wt-chain`) for everything else. Each hook:
+
+1. Does wt's job (canonical-refuse, branch validation, autopush).
+2. Invokes any **personal hook layer** at `~/.git-hooks-personal/<name>`
+   (e.g. [guardrails](https://github.com/noamsiegel/guardrails)).
+3. Chains to the repo-local `.git/hooks/<name>` if one exists.
+
+This composes cleanly with existing per-repo hook systems (Husky, lefthook,
+pre-commit framework, custom orchestrators) without needing to know about
+them.
+
+## Bypass / escape hatches
+
+| Goal | How |
+|---|---|
+| Commit in canonical (advisory only) | `git commit --no-verify` |
+| Skip autopush for this commit | `WT_NO_AUTOPUSH=1 git commit ...` |
+| Skip autopush's branch-guard pre-check | `WT_NO_AUTOPUSH_BRANCH_GUARD=1 git commit ...` |
+| Allow pushing branch not matching pattern | `WT_HOOK_ENFORCE_BRANCH_NAMES=false` (per-shell) or `git push --no-verify` |
+| Uninstall completely | `git config --global --unset core.hooksPath` and remove the directory |
+
+## Non-goals
+
+- Replacing Graphite or any other stacked-PR tool — `wt` doesn't talk to
+  PR systems.
+- Auto-discovering repos. You add repos by editing the config.
+- A TUI. `wt list` / `wt status` are line-oriented.
+- Auto-cleanup. Reaping is always explicit.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

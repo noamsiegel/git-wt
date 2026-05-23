@@ -1,0 +1,36 @@
+# Example wt configuration.
+# Copy to ~/.config/wt/config.yaml and customize for your setup.
+# Add a new repo with `wt onboard <path> --name <repo> --yes`.
+
+defaults:
+  # {repo} is interpolated to the repo's name from the `repos:` map.
+  worktree_root: ~/code/.worktrees/{repo}
+  base: origin/main
+  default_branch: main
+  herdr_workspace: "{repo}"
+  # Branch-shape patterns each pushed branch must match. Bash ERE.
+  branch_patterns:
+    - "^yourname/[a-z0-9-]+$"
+    - "^yourname/[A-Z]+-[0-9]+-[a-z0-9-]+$"
+    - "^pr-[0-9]+$"
+
+hooks:
+  # Whether `wt pre-push` enforces branch_patterns. Opt-in.
+  enforce_branch_names: false
+
+repos:
+  example-monorepo:
+    path: ~/code/example-monorepo
+    branch_patterns:
+      - "^yourname/[A-Z]+-[0-9]+-[a-z0-9-]+$"
+      - "^pr-[0-9]+$"
+
+  example-service:
+    path: ~/code/example-service
+
+# Paths under which wt refuses to operate (e.g. sub-agent isolation namespaces
+# managed by another tool). wt will never create a worktree under these.
+forbidden_roots: []
+
+# Maximum length of a branch name (full ref, including owner prefix).
+branch_max_length: 80

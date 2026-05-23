@@ -1,0 +1,1203 @@
+#!/usr/bin/env bash
+# wt — tiny worktree CLI. See ~/.pai/plans/wt-worktree-cli.md for the spec.
+# Exit codes: 0 ok | 10 validation | 20 guardrail | 30 dep down | 40 lock | 50 rolled-back | 60 partial-noroll | 70 dry-refuse | 1 unknown
+
+set -euo pipefail
+IFS=$'\n\t'
+
+WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
+WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
+WT_VERSION="0.1.0"
+
+red() { printf '\033[31m%b\033[0m' "$*"; }
+yellow() { printf '\033[33m%b\033[0m' "$*"; }
+green() { printf '\033[32m%b\033[0m' "$*"; }
+dim() { printf '\033[2m%b\033[0m' "$*"; }
+die() { local code=$1; shift; printf '%s %s\n' "$(red ERROR:)" "$*" >&2; exit "$code"; }
+warn() { printf '%s %s\n' "$(yellow WARN:)" "$*" >&2; }
+info() { printf '%s\n' "$*" >&2; }
+
+# ---------- dep checks ----------
+have() { command -v "$1" >/dev/null 2>&1; }
+
+require_deps() {
+  have bash || die 30 "bash not found"
+  if (( BASH_VERSINFO[0] < 4 )); then
+    die 30 "wt requires bash >= 4 (got $BASH_VERSION). Install via 'brew install bash'."
+  fi
+  have yq || die 30 "yq not found. Install via 'brew install yq' (mikefarah/yq)."
+  yq --version 2>&1 | grep -q mikefarah || die 30 "wrong yq dialect; need mikefarah/yq"
+  have git || die 30 "git not found"
+  # herdr is optional: tab management is skipped when unavailable.
+  # Core worktree commands (new, list, status, reap, doctor) still work.
+  if ! have herdr; then
+    warn "herdr not found — tab management will be skipped. Install: see README."
+  fi
+  have realpath || die 30 "realpath not found"
+  [[ -r "$WT_CONFIG" ]] || die 30 "config not readable: $WT_CONFIG"
+}
+
+# ---------- config helpers ----------
+# ---------- config (cached) ----------
+# Single yq dump of the entire config at first read; subsequent reads hit bash arrays.
+# Invalidate by setting _CFG_LOADED=0 (only needed after wt itself writes to the config).
+_CFG_LOADED=0
+declare -gA _CFG_REPO_FIELDS=()
+declare -gA _CFG_PATTERNS=()
+_CFG_REPOS_LIST=""
+_CFG_FORBIDDEN_LIST=""
+_CFG_MAX_LEN=80
+_CFG_HOOK_ENFORCE_BRANCH_NAMES=false
+
+_cfg_load() {
+  (( _CFG_LOADED == 1 )) && return 0
+  local line key value repo field seen=":"
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" != *=* ]] && continue
+    key="${line%% =*}"
+    value="${line#*= }"
+    case "$key" in
+      defaults.branch_patterns.*)
+        _CFG_PATTERNS[__defaults__]+="$value"$'\n'
+        ;;
+      defaults.*)
+        field="${key#defaults.}"
+        _CFG_REPO_FIELDS["__defaults__.$field"]="$value"
+        ;;
+      hooks.enforce_branch_names)
+        _CFG_HOOK_ENFORCE_BRANCH_NAMES="$value"
+        ;;
+      repos.*.branch_patterns.*)
+        repo="${key#repos.}"; repo="${repo%%.*}"
+        _CFG_PATTERNS[$repo]+="$value"$'\n'
+        # First sighting of this repo (order-preserving)?
+        [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+        ;;
+      repos.*.*)
+        repo="${key#repos.}"; field="${repo#*.}"; repo="${repo%%.*}"
+        _CFG_REPO_FIELDS["$repo.$field"]="$value"
+        [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+        ;;
+      forbidden_roots.*)
+        _CFG_FORBIDDEN_LIST+="$value"$'\n'
+        ;;
+      branch_max_length)
+        _CFG_MAX_LEN="$value"
+        ;;
+    esac
+  done < <(yq -o=props . "$WT_CONFIG" 2>/dev/null)
+  _CFG_LOADED=1
+}
+cfg_repos() { _cfg_load; printf '%s' "$_CFG_REPOS_LIST"; }
+cfg_repo_get() {
+  _cfg_load
+  local repo="$1" field="$2" v="${_CFG_REPO_FIELDS[$1.$2]:-}"
+  if [[ -z "$v" ]]; then
+    v="${_CFG_REPO_FIELDS[__defaults__.$field]:-}"
+  fi
+  if [[ -n "$v" ]]; then
+    v="${v//\{repo\}/$repo}"
+  fi
+  [[ -z "$v" ]] && echo "null" || echo "$v"
+}
+cfg_branch_patterns() {
+  _cfg_load
+  local patterns="${_CFG_PATTERNS[$1]:-}"
+  [[ -z "$patterns" ]] && patterns="${_CFG_PATTERNS[__defaults__]:-}"
+  printf '%s' "$patterns"
+}
+cfg_forbidden() { _cfg_load; printf '%s' "$_CFG_FORBIDDEN_LIST"; }
+cfg_max_branch_len() { _cfg_load; echo "$_CFG_MAX_LEN"; }
+cfg_hook_enforce_branch_names() { _cfg_load; echo "$_CFG_HOOK_ENFORCE_BRANCH_NAMES"; }
+
+# Realpath of a path; never fails (returns input on miss).
+rp() { realpath "$1" 2>/dev/null || echo "$1"; }
+
+# ---------- forbidden-root check (UNCONDITIONAL; every command) ----------
+guard_forbidden() {
+  local probes=("$PWD")
+  while (($#)); do probes+=("$1"); shift; done
+  local probe forbidden rp_probe rp_forbidden
+  for probe in "${probes[@]}"; do
+    rp_probe=$(rp "$probe")
+    while IFS= read -r forbidden; do
+      [[ -z "$forbidden" ]] && continue
+      rp_forbidden=$(rp "$forbidden")
+      if [[ "$rp_probe" == "$rp_forbidden" || "$rp_probe" == "$rp_forbidden"/* ]]; then
+        die 20 "path '$probe' is under forbidden root '$forbidden' (reserved for OMP isolation)"
+      fi
+    done < <(cfg_forbidden)
+  done
+}
+
+# Refuse if $PWD is the top-level of (or under) any configured canonical repo.
+# Per spec guardrail #5: trains "canonical = parking spot" muscle memory.
+guard_not_canonical() {
+  local cwd repo path
+  cwd=$(rp "$PWD")
+  for repo in $(cfg_repos); do
+    path=$(rp "$(cfg_repo_get "$repo" path)")
+    if [[ "$cwd" == "$path" || "$cwd" == "$path"/* ]]; then
+      die 20 "cwd is inside canonical checkout of '$repo' ($path) — canonical is read-only. Use 'wt new' / 'wt adopt' from elsewhere."
+    fi
+  done
+}
+# ---------- repo resolution ----------
+# Determine which configured repo this id belongs to by searching every worktree_root.
+repo_for_id() {
+  local id="$1" repo wt_root
+  for repo in $(cfg_repos); do
+    wt_root=$(cfg_repo_get "$repo" worktree_root)
+    if [[ -d "$wt_root/$id" ]]; then
+      echo "$repo"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Determine canonical or worktree context from $PWD; outputs "<repo> <kind>".
+repo_for_cwd() {
+  local cwd repo path wt_root
+  cwd=$(rp "$PWD")
+  for repo in $(cfg_repos); do
+    path=$(rp "$(cfg_repo_get "$repo" path)")
+    wt_root=$(rp "$(cfg_repo_get "$repo" worktree_root)")
+    if [[ "$cwd" == "$path" || "$cwd" == "$path"/* ]]; then
+      echo "$repo canonical"
+      return 0
+    fi
+    if [[ "$cwd" == "$wt_root"/* ]]; then
+      echo "$repo worktree"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ---------- branch / id helpers ----------
+validate_branch_shape() {
+  local repo="$1" branch="$2"
+  local maxlen pattern
+  maxlen=$(cfg_max_branch_len)
+  if (( ${#branch} > maxlen )); then
+    die 10 "branch name >$maxlen chars: ${branch}"
+  fi
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" ]] && continue
+    if [[ "$branch" =~ $pattern ]]; then return 0; fi
+  done < <(cfg_branch_patterns "$repo")
+  die 10 "branch '$branch' does not match any configured pattern for repo '$repo'"
+}
+
+# Strip up-to-first-slash prefix; fallback to verbatim.
+derive_id() {
+  local branch="$1"
+  if [[ "$branch" == */* ]]; then echo "${branch#*/}"; else echo "$branch"; fi
+}
+
+# ---------- locking ----------
+acquire_lock() {
+  local wt_root="$1"
+  mkdir -p "$wt_root"
+  local lock_dir="$wt_root/.wt.lock"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    local locker
+    locker=$(cat "$lock_dir/pid" 2>/dev/null || echo "?")
+    die 40 "worktree_root $wt_root is locked by pid $locker"
+  fi
+  echo $$ > "$lock_dir/pid"
+  WT_LOCK_DIR="$lock_dir"
+  trap 'release_lock' EXIT INT TERM
+}
+release_lock() {
+  [[ -n "${WT_LOCK_DIR:-}" && -d "$WT_LOCK_DIR" ]] && rm -rf "$WT_LOCK_DIR" 2>/dev/null || true
+  WT_LOCK_DIR=""
+}
+
+# ---------- herdr helpers ----------
+herdr_server_up() { herdr status server 2>/dev/null | grep -q '^status: running'; }
+
+herdr_ws_id() {
+  local label="$1"
+  herdr workspace list 2>/dev/null \
+    | yq -p json -r ".result.workspaces[] | select(.label == \"$label\") | .workspace_id" \
+    | head -1
+}
+
+herdr_ensure_ws() {
+  local label="$1" ws_id
+  ws_id=$(herdr_ws_id "$label")
+  if [[ -z "$ws_id" ]]; then
+    herdr workspace create --label "$label" --no-focus >/dev/null \
+      || die 30 "couldn't create herdr workspace '$label'"
+    ws_id=$(herdr_ws_id "$label")
+  fi
+  [[ -n "$ws_id" ]] || die 30 "couldn't resolve herdr workspace '$label'"
+  echo "$ws_id"
+}
+
+# Find a pane in a workspace whose cwd (realpath-resolved) matches target.
+herdr_pane_for_cwd() {
+  local ws_id="$1" target="$2" rp_target
+  rp_target=$(rp "$target")
+  herdr pane list --workspace "$ws_id" 2>/dev/null \
+    | yq -p json -r ".result.panes[] | select(.cwd == \"$target\" or .cwd == \"$rp_target\") | .tab_id" \
+    | head -1
+}
+herdr_create_tab() {
+  local ws_id="$1" cwd="$2" label="$3"
+  herdr tab create --workspace "$ws_id" --cwd "$cwd" --label "$label" --focus >/dev/null \
+    || return 1
+}
+
+herdr_close_tab() {
+  local tab_id="$1"
+  herdr tab close "$tab_id" >/dev/null 2>&1 || return 1
+}
+
+# Returns "working", "idle", "blocked", "unknown", or "" if no tab.
+herdr_tab_status() {
+  local ws_id="$1" tab_id="$2"
+  herdr tab list --workspace "$ws_id" 2>/dev/null \
+    | yq -p json -r ".result.tabs[] | select(.tab_id == \"$tab_id\") | .agent_status" \
+    | head -1
+}
+
+# ---------- git helpers ----------
+git_in() { git -C "$1" "${@:2}"; }
+
+branch_exists_local() { git_in "$1" show-ref --verify --quiet "refs/heads/$2"; }
+branch_exists_origin() {
+  git_in "$1" ls-remote --exit-code --heads origin "$2" >/dev/null 2>&1
+}
+wt_dir_registered() {
+  local canonical="$1" path="$2"
+  git_in "$canonical" worktree list --porcelain | grep -q "^worktree $path$"
+}
+
+is_clean() {
+  local wt="$1"
+  [[ -z "$(git_in "$wt" status --porcelain 2>/dev/null)" ]]
+}
+
+is_pushed() {
+  # Returns 0 if branch has an upstream and no local-only commits.
+  local wt="$1"
+  local upstream
+  upstream=$(git_in "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || return 1
+  local ahead
+  ahead=$(git_in "$wt" rev-list --count "$upstream"..HEAD 2>/dev/null) || return 1
+  [[ "$ahead" == "0" ]]
+}
+
+reachable_from() {
+  # 0 if every commit on HEAD is present (by patch-id) in origin/<default>.
+  local wt="$1" default="$2"
+  local out
+  out=$(git_in "$wt" cherry "origin/$default" 2>/dev/null) || return 1
+  [[ -z "$(echo "$out" | grep '^+')" ]]
+}
+
+# ---------- subcommands ----------
+
+cmd_doctor() {
+  local install_hooks=0 fail=0
+  while (($#)); do
+    case "$1" in
+      --install-hooks) install_hooks=1 ;;
+      *) die 10 "unknown flag: $1" ;;
+    esac
+    shift
+  done
+
+  printf '%-40s' "bash >= 4"; if (( BASH_VERSINFO[0] >= 4 )); then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  printf '%-40s' "yq (mikefarah/yq)"; if yq --version 2>&1 | grep -q mikefarah; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  printf '%-40s' "git available"; if have git; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  printf '%-40s' "herdr available"; if have herdr; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  printf '%-40s' "herdr server running"; if herdr_server_up; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  printf '%-40s' "config readable"; if [[ -r "$WT_CONFIG" ]]; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+
+  local repo path default
+  for repo in $(cfg_repos); do
+    path=$(cfg_repo_get "$repo" path)
+    default=$(cfg_repo_get "$repo" default_branch)
+    printf '%-40s' "[$repo] canonical exists"
+    if [[ -d "$path/.git" || -f "$path/.git" ]]; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+    printf '%-40s' "[$repo] canonical on $default"
+    local cur
+    cur=$(git_in "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+    if [[ "$cur" == "$default" ]]; then green "PASS\n"; else yellow "WARN ($cur)\n"; fi
+    printf '%-40s' "[$repo] canonical clean"
+    if is_clean "$path"; then green "PASS\n"; else yellow "WARN (dirty)\n"; fi
+  done
+
+  printf '%-40s' "no worktrees under forbidden_roots"
+  local bad=0 wt_root
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    for repo in $(cfg_repos); do
+      wt_root=$(cfg_repo_get "$repo" worktree_root)
+      if [[ "$(rp "$wt_root")" == "$f"/* ]]; then bad=1; break 2; fi
+    done
+  done < <(cfg_forbidden)
+  if (( bad == 0 )); then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+
+  printf '%-40s' "core.hooksPath set"
+  local hp
+  hp=$(git config --global core.hooksPath 2>/dev/null || echo "")
+  if [[ "$hp" == "$HOME/.config/git/hooks" ]]; then green "PASS\n"; else yellow "WARN (not set)\n"; fi
+
+  if (( install_hooks == 1 )); then
+    generate_path_cache
+    green "wrote $WT_CACHE\n"
+  fi
+
+  (( fail == 0 )) || exit 1
+}
+
+generate_path_cache() {
+  local repo path wt_root tmp rp_path rp_wt_root rp_forbidden
+  tmp=$(mktemp)
+  {
+    echo "# autogenerated by wt doctor --install-hooks (do not edit)"
+    printf 'WT_CANONICAL_PATHS=('
+    for repo in $(cfg_repos); do
+      path=$(cfg_repo_get "$repo" path)
+      rp_path=$(rp "$path")
+      printf "%q %q " "$path" "$rp_path"
+    done
+    printf ')\n'
+    printf 'WT_WORKTREE_ROOTS=('
+    for repo in $(cfg_repos); do
+      wt_root=$(cfg_repo_get "$repo" worktree_root)
+      rp_wt_root=$(rp "$wt_root")
+      printf "%q %q " "$wt_root" "$rp_wt_root"
+    done
+    printf ')\n'
+    printf 'WT_FORBIDDEN_ROOTS=('
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      rp_forbidden=$(rp "$f")
+      printf "%q %q " "$f" "$rp_forbidden"
+    done < <(cfg_forbidden)
+    printf ')\n'
+    printf 'WT_HOOK_ENFORCE_BRANCH_NAMES=%q\n' "$(cfg_hook_enforce_branch_names)"
+    echo 'declare -A WT_REPO_BY_PATH=('
+    for repo in $(cfg_repos); do
+      path=$(cfg_repo_get "$repo" path)
+      rp_path=$(rp "$path")
+      printf "  [%q]=%q\n" "$path" "$repo"
+      [[ "$path" != "$rp_path" ]] && printf "  [%q]=%q\n" "$rp_path" "$repo"
+    done
+    echo ')'
+    for repo in $(cfg_repos); do
+      printf 'WT_PATTERNS_%s=(\n' "${repo//[^a-zA-Z0-9_]/_}"
+      while IFS= read -r p; do printf "  %q\n" "$p"; done < <(cfg_branch_patterns "$repo")
+      printf ')\n'
+    done
+  } > "$tmp"
+  mv "$tmp" "$WT_CACHE"
+}
+cmd_new() {
+  guard_forbidden
+  local branch="" repo_override=""
+  while (($#)); do
+    case "$1" in
+      --repo) repo_override="${2:-}"; shift 2 ;;
+      -*) die 10 "unknown flag: $1" ;;
+      *) [[ -z "$branch" ]] && branch="$1" || die 10 "unexpected positional: $1"; shift ;;
+    esac
+  done
+  [[ -n "$branch" ]] || die 10 "usage: wt new [--repo <name>] <branch>"
+
+  # Repo resolution priority: --repo flag > cwd inference > unique branch-pattern match > first config entry.
+  local repo cwd_info
+  if [[ -n "$repo_override" ]]; then
+    local _check=$(cfg_repo_get "$repo_override" path 2>/dev/null)
+    [[ "$_check" == "null" || -z "$_check" ]] && die 10 "unknown repo: $repo_override (configured: $(cfg_repos | tr '\n' ' '))"
+    repo="$repo_override"
+  elif cwd_info=$(repo_for_cwd 2>/dev/null); then
+    repo="${cwd_info%% *}"
+  else
+    # Pattern-based inference: find repos whose branch_patterns match this branch.
+    local matches=() candidate p
+    for candidate in $(cfg_repos); do
+      while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        if [[ "$branch" =~ $p ]]; then matches+=("$candidate"); break; fi
+      done < <(cfg_branch_patterns "$candidate")
+    done
+    if (( ${#matches[@]} == 1 )); then
+      repo="${matches[0]}"
+    elif (( ${#matches[@]} == 0 )); then
+      repo=$(cfg_repos | head -1)
+      warn "branch '$branch' matches no repo pattern; defaulting to '$repo' (use --repo to override)"
+    else
+      die 10 "branch '$branch' matches multiple repos (${matches[*]}); pass --repo <name>"
+    fi
+  fi
+  validate_branch_shape "$repo" "$branch"
+  local id canonical wt_root base default_branch ws_name target
+  id=$(derive_id "$branch")
+  canonical=$(cfg_repo_get "$repo" path)
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  base=$(cfg_repo_get "$repo" base)
+  default_branch=$(cfg_repo_get "$repo" default_branch)
+  ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+  target="$wt_root/$id"
+
+  guard_forbidden "$target"
+  [[ -d "$canonical/.git" || -f "$canonical/.git" ]] || die 20 "canonical $canonical is not a git repo"
+  herdr_server_up || die 30 "herdr server not running (need it for 1:1 tab binding)"
+
+  acquire_lock "$wt_root"
+  [[ -e "$target" ]] && die 20 "target path already exists: $target"
+  wt_dir_registered "$canonical" "$target" && die 20 "target path already registered as a worktree"
+  branch_exists_local "$canonical" "$branch" && die 20 "branch already exists locally: $branch"
+  branch_exists_origin "$canonical" "$branch" && die 20 "branch already exists on origin: $branch"
+
+  info "$(dim "→ fetching $base in $canonical (best-effort)")"
+  git_in "$canonical" fetch --quiet origin "${base#origin/}" 2>/dev/null || warn "git fetch failed; proceeding with local refs"
+
+  info "$(dim "→ creating worktree $target from $base on new branch $branch")"
+  if ! git_in "$canonical" worktree add -b "$branch" "$target" "$base" >/dev/null; then
+    die 1 "git worktree add failed"
+  fi
+  # New branches have no upstream until first push. Unset the auto-track that `git worktree add -b` sets.
+  git_in "$target" branch --unset-upstream 2>/dev/null || true
+
+  info "$(dim "→ creating herdr tab in workspace '$ws_name'")"
+  local ws_id
+  ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
+  if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
+    warn "herdr tab create failed — rolling back"
+    git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
+    git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
+    die 50 "rolled back worktree+branch due to herdr failure"
+  fi
+
+  green "created "
+  printf 'worktree=%s branch=%s id=%s tab in workspace=%s\n' "$target" "$branch" "$id" "$ws_name"
+}
+
+cmd_adopt() {
+  guard_forbidden
+  local branch="${1:-}" id_override="" commit_wip=0
+  shift || true
+  while (($#)); do
+    case "$1" in
+      --id) id_override="${2:-}"; shift 2 ;;
+      --commit-wip) commit_wip=1; shift ;;
+      *) die 10 "unknown flag: $1" ;;
+    esac
+  done
+  [[ -n "$branch" ]] || die 10 "usage: wt adopt <branch> [--id <id>]"
+  local repo
+  local cwd_info
+  if cwd_info=$(repo_for_cwd 2>/dev/null); then
+    repo="${cwd_info%% *}"
+  else
+    repo=$(cfg_repos | head -1)
+  fi
+  local id canonical wt_root base default_branch ws_name target
+  id=${id_override:-$(derive_id "$branch")}
+  canonical=$(cfg_repo_get "$repo" path)
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  base=$(cfg_repo_get "$repo" base)
+  default_branch=$(cfg_repo_get "$repo" default_branch)
+  ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+  target="$wt_root/$id"
+
+  guard_forbidden "$target"
+  herdr_server_up || die 30 "herdr server not running"
+
+  # Preflight
+  branch_exists_local "$canonical" "$branch" || die 20 "branch '$branch' does not exist locally in $canonical"
+  [[ -e "$target" ]] && die 20 "target path already exists: $target"
+
+  acquire_lock "$wt_root"
+  local original_branch
+  original_branch=$(git_in "$canonical" rev-parse --abbrev-ref HEAD)
+  local original_clean=1
+  is_clean "$canonical" || original_clean=0
+  if (( original_clean == 0 )); then
+    if (( commit_wip == 1 )); then
+      local cur; cur=$(git_in "$canonical" rev-parse --abbrev-ref HEAD)
+      [[ "$cur" == "$branch" ]] || die 20 "--commit-wip requires canonical to be on '$branch' (currently '$cur'); switch first or commit manually"
+      info "$(dim "+ committing WIP snapshot on $branch (--no-verify)")"
+      git_in "$canonical" add -A >/dev/null || die 1 "git add failed"
+      git_in "$canonical" commit --no-verify --quiet -m "WIP: pre-wt-adopt snapshot ($branch)" >/dev/null || die 1 "git commit failed"
+    else
+      die 20 "canonical $canonical has uncommitted changes; commit, stash, or pass --commit-wip"
+    fi
+  fi
+  info "$(dim "detaching canonical from $branch onto $base")"
+  if ! git_in "$canonical" switch --detach "$base" >/dev/null 2>&1; then
+    die 1 "could not detach canonical to $base"
+  fi
+  info "$(dim "→ creating worktree $target for existing branch $branch")"
+  if ! git_in "$canonical" worktree add "$target" "$branch" >/dev/null 2>&1; then
+    git_in "$canonical" switch "$original_branch" >/dev/null 2>&1 || true
+    die 1 "git worktree add failed"
+  fi
+  info "$(dim "→ creating herdr tab in workspace '$ws_name'")"
+  local ws_id
+  ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
+  if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
+    warn "herdr tab create failed — rolling back"
+    git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
+    git_in "$canonical" switch "$original_branch" >/dev/null 2>&1 || true
+    die 50 "rolled back due to herdr failure"
+  fi
+
+  # Park canonical on default_branch
+  if branch_exists_local "$canonical" "$default_branch"; then
+    git_in "$canonical" switch "$default_branch" >/dev/null 2>&1 \
+      || warn "couldn't switch canonical to $default_branch (continuing detached)"
+  else
+    git_in "$canonical" switch -c "$default_branch" "$base" >/dev/null 2>&1 \
+      || warn "couldn't create $default_branch from $base"
+  fi
+
+  green "adopted "
+  printf 'branch=%s worktree=%s id=%s tab in workspace=%s\n' "$branch" "$target" "$id" "$ws_name"
+  info "canonical now parked on $(git_in "$canonical" rev-parse --abbrev-ref HEAD)"
+}
+
+cmd_pr() {
+  guard_forbidden
+  local num="${1:-}"
+  [[ "$num" =~ ^[0-9]+$ ]] || die 10 "usage: wt pr <number>"
+  local repo
+  local cwd_info
+  if cwd_info=$(repo_for_cwd 2>/dev/null); then
+    repo="${cwd_info%% *}"
+  else
+    repo=$(cfg_repos | head -1)
+  fi
+  local branch="pr-$num" id canonical wt_root ws_name target
+  id="$branch"
+  canonical=$(cfg_repo_get "$repo" path)
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+  target="$wt_root/$id"
+  validate_branch_shape "$repo" "$branch"
+  guard_forbidden "$target"
+  herdr_server_up || die 30 "herdr server not running"
+
+  acquire_lock "$wt_root"
+  [[ -e "$target" ]] && die 20 "target path already exists: $target"
+  branch_exists_local "$canonical" "$branch" && die 20 "branch already exists locally: $branch (use 'wt cd $id' or 'wt reap')"
+
+  info "$(dim "→ fetching pull/$num/head as $branch")"
+  if ! git_in "$canonical" fetch origin "pull/$num/head:$branch" >/dev/null 2>&1; then
+    die 1 "could not fetch pull/$num/head — does the PR exist?"
+  fi
+  info "$(dim "→ creating worktree $target")"
+  if ! git_in "$canonical" worktree add "$target" "$branch" >/dev/null 2>&1; then
+    git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
+    die 1 "git worktree add failed"
+  fi
+  local ws_id
+  ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
+  if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
+    warn "herdr tab create failed — rolling back"
+    git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
+    git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
+    die 50 "rolled back due to herdr failure"
+  fi
+  green "fetched PR #$num "
+  printf 'worktree=%s branch=%s\n' "$target" "$branch"
+}
+
+cmd_list() {
+  guard_not_canonical
+  local repo
+  for repo in $(cfg_repos); do
+    local canonical wt_root ws_name ws_id
+    canonical=$(cfg_repo_get "$repo" path)
+    wt_root=$(cfg_repo_get "$repo" worktree_root)
+    ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+    ws_id=$(herdr_ws_id "$ws_name" || true)
+    printf '%s\n' "$(green "[$repo]") canonical=$canonical worktree_root=$wt_root herdr_ws=$ws_name"
+    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
+    # Render plain rows first; pipe through `column -t` for alignment, then color the header.
+    {
+      printf 'ID\tSHA\tBRANCH\tTAB\n'
+      echo "$rows" | awk '
+        /^worktree / { path=$2; next }
+        /^HEAD / { sha=substr($2,1,10); next }
+        /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
+        /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
+      ' | while IFS=$'\t' read -r path sha ref; do
+        [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
+        local id="${path##*/}" tab="-"
+        if [[ -n "$ws_id" ]]; then
+          local tab_id; tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+          [[ -n "$tab_id" ]] && tab="herdr:$tab_id" || tab="no-tab"
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$id" "$sha" "$ref" "$tab"
+      done
+    } | column -t -s $'\t' | sed '1 s/^/  /; 2,$ s/^/  /'
+  done
+}
+
+cmd_status() {
+  guard_not_canonical
+  local refresh=0
+  while (($#)); do case "$1" in --refresh) refresh=1; shift;; *) die 10 "unknown flag: $1";; esac; done
+  local repo
+  for repo in $(cfg_repos); do
+    local canonical wt_root ws_name ws_id default_branch
+    canonical=$(cfg_repo_get "$repo" path)
+    wt_root=$(cfg_repo_get "$repo" worktree_root)
+    ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+    default_branch=$(cfg_repo_get "$repo" default_branch)
+    ws_id=$(herdr_ws_id "$ws_name" || true)
+    (( refresh == 1 )) && git_in "$canonical" fetch origin "$default_branch" --quiet 2>/dev/null || true
+    printf '%s\n' "$(green "[$repo]")"
+    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
+    {
+      printf 'ID\tCLEAN\tPUSHED\tREACH\tTAB\tBRANCH\n'
+      echo "$rows" | awk '
+        /^worktree / { path=$2; next }
+        /^HEAD / { sha=substr($2,1,10); next }
+        /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
+        /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
+      ' | while IFS=$'\t' read -r path sha ref; do
+        [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
+        local id="${path##*/}" c p r t
+        is_clean "$path" && c=yes || c=no
+        is_pushed "$path" && p=yes || p=no
+        reachable_from "$path" "$default_branch" && r=yes || r=no
+        t='-'
+        if [[ -n "$ws_id" ]]; then
+          local tab_id; tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+          if [[ -n "$tab_id" ]]; then
+            t=$(herdr_tab_status "$ws_id" "$tab_id"); [[ -z "$t" ]] && t=unknown
+          else
+            t=no-tab
+          fi
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$c" "$p" "$r" "$t" "$ref"
+      done
+    } | column -t -s $'\t' | sed 's/^/  /'
+  done
+}
+cmd_audit() {
+  # Read-only check: list worktree branches with commits not yet on origin/<default>.
+  # TSV output, one row per finding: repo\tid\tbranch\tahead\tstatus[\tdetail]
+  # status in: unpushed | ahead-of-upstream | pushed-unmerged
+  # Designed for machine consumption (PAI SessionStart hook).
+  local fetch=1
+  while (($#)); do
+    case "$1" in
+      --no-fetch) fetch=0; shift ;;
+      -*) die 10 "unknown flag: $1" ;;
+      *) die 10 "unknown arg: $1" ;;
+    esac
+  done
+  local repo
+  for repo in $(cfg_repos); do
+    local canonical default_branch
+    canonical=$(cfg_repo_get "$repo" path)
+    default_branch=$(cfg_repo_get "$repo" default_branch)
+    (( fetch == 1 )) && git_in "$canonical" fetch origin "$default_branch" --quiet 2>/dev/null || true
+    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
+    echo "$rows" | awk '
+      /^worktree / { path=$2; next }
+      /^HEAD / { sha=substr($2,1,10); next }
+      /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
+      /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
+    ' | while IFS=$'\t' read -r path sha ref; do
+      [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
+      [[ "$ref" == "(detached)" ]] && continue
+      [[ -d "$path" ]] || continue
+      reachable_from "$path" "$default_branch" && continue
+      local id="${path##*/}" status detail ahead_of_main ahead_of_up upstream
+      ahead_of_main=$(git_in "$path" rev-list --count "origin/$default_branch..HEAD" 2>/dev/null || echo 0)
+      if upstream=$(git_in "$path" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
+        ahead_of_up=$(git_in "$path" rev-list --count "$upstream..HEAD" 2>/dev/null || echo 0)
+        if [[ "$ahead_of_up" != "0" ]]; then
+          status="ahead-of-upstream"
+          detail="$ahead_of_up ahead of $upstream"
+        else
+          status="pushed-unmerged"
+          detail="on $upstream, not merged to $default_branch"
+        fi
+      else
+        status="unpushed"
+        detail="no upstream"
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$id" "$ref" "$ahead_of_main" "$status" "$detail"
+    done
+  done
+}
+
+cmd_reap() {
+  guard_forbidden
+  local force=0 dry=0 ids=()
+  while (($#)); do
+    case "$1" in
+      --force) force=1; shift ;;
+      --dry-run) dry=1; shift ;;
+      -*) die 10 "unknown flag: $1" ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  (( ${#ids[@]} > 0 )) || die 10 "usage: wt reap [--force] [--dry-run] <id>..."
+
+  local id repo
+  for id in "${ids[@]}"; do
+    repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
+    local canonical wt_root ws_name ws_id default_branch path
+    canonical=$(cfg_repo_get "$repo" path)
+    wt_root=$(cfg_repo_get "$repo" worktree_root)
+    ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+    default_branch=$(cfg_repo_get "$repo" default_branch)
+    path="$wt_root/$id"
+    ws_id=$(herdr_ws_id "$ws_name" || true)
+
+    # Safety
+    local refusals=()
+    if [[ -d "$path" ]]; then
+      is_clean "$path" || refusals+=("uncommitted-changes")
+      is_pushed "$path" || refusals+=("unpushed-commits")
+      reachable_from "$path" "$default_branch" || refusals+=("not-reachable-from-origin/$default_branch")
+    fi
+    if [[ -n "$ws_id" ]]; then
+      local tab_id stt
+      tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+      if [[ -n "$tab_id" ]]; then
+        stt=$(herdr_tab_status "$ws_id" "$tab_id")
+        if [[ "$stt" == "working" ]]; then refusals+=("agent-working-in-tab"); fi
+      fi
+    fi
+    # Process-cwd / open-files check (catches OMP sub-agents, editors, watchers, dev servers).
+    # Run AFTER the cheap herdr check; lsof +D walks the worktree tree.
+    if [[ -d "$path" ]] && command -v lsof >/dev/null 2>&1; then
+      local lsof_out
+      lsof_out=$(lsof +D "$path" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)
+      if [[ -n "$lsof_out" ]]; then
+        local n_pids; n_pids=$(echo "$lsof_out" | wc -l | tr -d ' ')
+        refusals+=("files-open-by-${n_pids}-process(es)")
+      fi
+    fi
+    if (( ${#refusals[@]} > 0 && force == 0 )); then
+      printf '%s %s [%s]\n' "$(red REFUSE)" "$id" "$(IFS=,; echo "${refusals[*]}")"
+      (( dry == 1 )) && continue
+      die 70 "reap refused without --force (id=$id)"
+    fi
+
+    if (( dry == 1 )); then
+      printf '%s %s\n' "$(yellow DRY)" "would reap id=$id path=$path branch=(see status)"
+      continue
+    fi
+
+    acquire_lock "$wt_root"
+    # 1. close tab first
+    if [[ -n "$ws_id" ]]; then
+      local tab_id
+      tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+      if [[ -n "$tab_id" ]]; then
+        herdr_close_tab "$tab_id" || warn "couldn't close herdr tab $tab_id (continuing)"
+      fi
+    fi
+    # 2. remove worktree
+    local rp_path=$(rp "$path")
+    local branch=""
+    branch=$(git_in "$canonical" worktree list --porcelain 2>/dev/null \
+              | awk -v p="$path" -v rp="$rp_path" 'BEGIN{f=0} $1=="worktree"{f=($2==p || $2==rp)} f && $1=="branch"{print $2; exit}')
+    branch="${branch#refs/heads/}"
+    if [[ -d "$path" ]]; then
+      if ! git_in "$canonical" worktree remove "$path" --force >/dev/null 2>&1; then
+        die 60 "git worktree remove failed; run 'wt repair' to reconcile"
+      fi
+    else
+      git_in "$canonical" worktree prune >/dev/null 2>&1 || true
+    fi
+    # 3. delete branch if reachable from origin/<default>
+    if [[ -n "$branch" ]]; then
+      if git_in "$canonical" cherry "origin/$default_branch" "$branch" 2>/dev/null | grep -q '^+'; then
+        warn "branch '$branch' has commits not in origin/$default_branch; not deleting"
+      else
+        git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || warn "branch -D failed for $branch"
+      fi
+    fi
+    release_lock
+    green "reaped "
+    printf 'id=%s branch=%s\n' "$id" "$branch"
+  done
+}
+
+cmd_cd() {
+  guard_not_canonical
+  local id="${1:-}"
+  [[ -n "$id" ]] || die 10 "usage: wt cd <id>"
+  local repo
+  repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  local wt_root path
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  path="$wt_root/$id"
+  echo "$path"
+}
+
+cmd_focus() {
+  guard_not_canonical
+  local id="${1:-}"
+  [[ -n "$id" ]] || die 10 "usage: wt focus <id>"
+  local repo
+  repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  local wt_root path ws_name ws_id tab_id
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+  path="$wt_root/$id"
+  ws_id=$(herdr_ws_id "$ws_name" || true)
+  [[ -n "$ws_id" ]] || die 30 "herdr workspace '$ws_name' not found"
+  tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+  [[ -n "$tab_id" ]] || die 20 "no herdr tab for $path"
+  herdr tab focus "$tab_id" >/dev/null && green "focused " && echo "$tab_id"
+}
+
+
+cmd_close_tab() {
+  guard_forbidden
+  local force=0 id=""
+  while (($#)); do
+    case "$1" in
+      --force) force=1; shift ;;
+      -*) die 10 "unknown flag: $1" ;;
+      *) [[ -z "$id" ]] && id="$1" || die 10 "unexpected positional: $1"; shift ;;
+    esac
+  done
+  [[ -n "$id" ]] || die 10 "usage: wt close-tab [--force] <id>"
+  local repo
+  repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  local wt_root path ws_name ws_id tab_id stt
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+  path="$wt_root/$id"
+  ws_id=$(herdr_ws_id "$ws_name" || true)
+  [[ -n "$ws_id" ]] || die 30 "herdr workspace '$ws_name' not found"
+  tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+  if [[ -z "$tab_id" ]]; then
+    printf 'no tab for %s\n' "$id"
+    return 0
+  fi
+  stt=$(herdr_tab_status "$ws_id" "$tab_id")
+  if [[ "$stt" == "working" && "$force" == "0" ]]; then
+    die 70 "tab $tab_id has agent_status=working; use --force to close anyway"
+  fi
+  herdr_close_tab "$tab_id" || die 30 "could not close herdr tab $tab_id"
+  green "closed "
+  printf '%s (%s)\n' "$tab_id" "$id"
+}
+
+cmd_resume() {
+  guard_forbidden
+  local id="${1:-}"
+  [[ -n "$id" ]] || die 10 "usage: wt resume <id>"
+  local repo
+  repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  local wt_root path ws_name ws_id tab_id
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+  path="$wt_root/$id"
+  [[ -d "$path" ]] || die 20 "worktree path missing: $path"
+  herdr_server_up || die 30 "herdr server not running"
+  ws_id=$(herdr_ensure_ws "$ws_name")
+  tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+  if [[ -z "$tab_id" ]]; then
+    herdr_create_tab "$ws_id" "$(rp "$path")" "$id" || die 30 "could not create herdr tab for $id"
+    tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+  else
+    herdr tab focus "$tab_id" >/dev/null || die 30 "could not focus herdr tab $tab_id"
+  fi
+  green "ready "
+  printf '%s\n' "$id"
+  printf 'cd %q\n' "$path"
+  [[ -n "$tab_id" ]] && printf 'tab %s\n' "$tab_id"
+}
+
+cmd_tidy() {
+  guard_not_canonical
+  local refresh=0
+  while (($#)); do
+    case "$1" in
+      --refresh) refresh=1; shift ;;
+      -*) die 10 "unknown flag: $1" ;;
+      *) die 10 "unexpected positional: $1" ;;
+    esac
+  done
+  local repo
+  for repo in $(cfg_repos); do
+    local canonical wt_root ws_name ws_id default_branch
+    canonical=$(cfg_repo_get "$repo" path)
+    wt_root=$(cfg_repo_get "$repo" worktree_root)
+    ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+    default_branch=$(cfg_repo_get "$repo" default_branch)
+    ws_id=$(herdr_ws_id "$ws_name" || true)
+    (( refresh == 1 )) && git_in "$canonical" fetch origin "$default_branch" --quiet 2>/dev/null || true
+    printf '%s\n' "$(green "[$repo]") tidy report"
+    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
+    local any=0
+    {
+      printf 'GROUP\tID\tTAB\tBRANCH\tACTION\n'
+      echo "$rows" | awk '
+        /^worktree / { path=$2; next }
+        /^HEAD / { sha=substr($2,1,10); next }
+        /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
+        /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
+      ' | while IFS=$'\t' read -r path sha ref; do
+        [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
+        any=1
+        local id="${path##*/}" clean pushed reach tab_id tab_status tab group action
+        is_clean "$path" && clean=yes || clean=no
+        is_pushed "$path" && pushed=yes || pushed=no
+        reachable_from "$path" "$default_branch" && reach=yes || reach=no
+        tab="no-tab"
+        tab_status=""
+        if [[ -n "$ws_id" ]]; then
+          tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+          if [[ -n "$tab_id" ]]; then
+            tab_status=$(herdr_tab_status "$ws_id" "$tab_id"); [[ -z "$tab_status" ]] && tab_status=unknown
+            tab="$tab_status"
+          fi
+        fi
+        if [[ "$clean" == "no" ]]; then
+          group="active-dirty"; action="keep; commit/stash before reap"
+        elif [[ "$pushed" == "yes" && "$reach" == "yes" ]]; then
+          group="safe-reap-candidate"; action="wt reap $id"
+        elif [[ "$tab" != "no-tab" && "$tab_status" != "working" ]]; then
+          group="tab-only-clutter"; action="wt close-tab $id"
+        elif [[ "$tab" == "no-tab" ]]; then
+          group="parked-no-tab"; action="wt resume $id if needed; wt reap only after review"
+        else
+          group="needs-review"; action="inspect before closing/reaping"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$group" "$id" "$tab" "$ref" "$action"
+      done
+    } | column -t -s $'\t' | sed 's/^/  /'
+  done
+}
+
+cmd_repair() {
+  guard_forbidden
+  local repo
+  for repo in $(cfg_repos); do
+    local canonical wt_root ws_name ws_id
+    canonical=$(cfg_repo_get "$repo" path)
+    wt_root=$(cfg_repo_get "$repo" worktree_root)
+    ws_name=$(cfg_repo_get "$repo" herdr_workspace)
+    ws_id=$(herdr_ws_id "$ws_name" || true)
+    info "[$repo] reconciling"
+    # Prune stale git metadata
+    git_in "$canonical" worktree prune -v 2>&1 | sed 's/^/  /' || true
+    # Walk worktrees: ensure tab for each existing dir
+    local rp_wt_root; rp_wt_root=$(rp "$wt_root")
+    # Walk worktrees: ensure tab for each existing dir.
+    local wt_paths=()
+    while IFS= read -r line; do
+      [[ "$line" == worktree\ * ]] && wt_paths+=("${line#worktree }")
+    done < <(git_in "$canonical" worktree list --porcelain 2>/dev/null)
+    local path id tab_id ans
+    for path in "${wt_paths[@]}"; do
+      [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
+      [[ ! -d "$path" ]] && continue
+      [[ -n "$ws_id" ]] || continue
+      id="${path##*/}"
+      tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
+      if [[ -z "$tab_id" ]]; then
+        printf '  %s missing herdr tab - recreate? [y/N] ' "$id"
+        read -r ans || ans=""
+        if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+          herdr_create_tab "$ws_id" "$(rp "$path")" "$id" && green "    created\n" || warn "    failed"
+        fi
+      fi
+    done
+    # Walk herdr tabs whose cwd has gone missing.
+    if [[ -n "$ws_id" ]]; then
+      local pane_lines=()
+      while IFS= read -r line; do pane_lines+=("$line"); done \
+        < <(herdr pane list --workspace "$ws_id" 2>/dev/null \
+            | yq -p json -r '.result.panes[] | [.tab_id, .cwd] | @tsv')
+      local tab_id cwd
+      for line in "${pane_lines[@]}"; do
+        IFS=$'\t' read -r tab_id cwd <<< "$line"
+        [[ -z "$tab_id" ]] && continue
+        local rp_cwd; rp_cwd=$(rp "$cwd")
+        if [[ "$rp_cwd" == "$rp_wt_root"/* && ! -d "$cwd" && ! -d "$rp_cwd" ]]; then
+          printf '  tab %s cwd missing (%s) - close? [y/N] ' "$tab_id" "$cwd"
+          read -r ans || ans=""
+          if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+            herdr_close_tab "$tab_id" && green "    closed\n" || warn "    failed"
+          fi
+        fi
+      done
+    fi
+    if [[ -d "$wt_root/.wt.lock" ]]; then
+      local locker
+      locker=$(cat "$wt_root/.wt.lock/pid" 2>/dev/null || echo "?")
+      if [[ "$locker" != "?" ]] && ! kill -0 "$locker" 2>/dev/null; then
+        printf '  stale lock from dead pid %s — remove? [y/N] ' "$locker"
+        read -r ans
+        [[ "$ans" == "y" || "$ans" == "Y" ]] && rm -rf "$wt_root/.wt.lock" && green "    removed\n"
+      fi
+    fi
+  done
+}
+
+
+cmd_onboard() {
+  local path="${1:-$PWD}" yes=0 name_override=""
+  shift || true
+  while (($#)); do
+    case "$1" in
+      --yes|-y) yes=1; shift ;;
+      --name) name_override="${2:-}"; shift 2 ;;
+      *) die 10 "unknown flag: $1" ;;
+    esac
+  done
+
+  path=$(rp "$path")
+  [[ -d "$path" ]] || die 10 "not a directory: $path"
+  git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || die 10 "not a git repo: $path"
+
+  # Resolve to the canonical checkout (handles being inside a worktree).
+  local canonical
+  canonical=$(dirname "$(git -C "$path" rev-parse --path-format=absolute --git-common-dir)")
+
+  local repo_name="${name_override:-$(basename "$canonical")}"
+  # Sanitize the repo name for YAML keys: lowercase, alnum + dash/underscore only.
+  local safe_name=$(printf %s "$repo_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-' | tr -s '-' | sed -E 's/^-+|-+$//g')
+
+  # Already configured?
+  local existing
+  existing=$(cfg_repo_get "$safe_name" path 2>/dev/null || echo "")
+  if [[ -n "$existing" && "$existing" != "null" ]]; then
+    if [[ "$(rp "$existing")" == "$canonical" ]]; then
+      info "$(dim "already configured as '$safe_name' \u2192 $existing")"
+      # Still rewire core.hooksPath if applicable.
+    else
+      die 10 "repo name '$safe_name' is taken by $existing (use --name <other>)"
+    fi
+  fi
+
+  # Detect remote-tracked default branch.
+  local default_branch
+  default_branch=$(git -C "$canonical" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|^refs/remotes/origin/||') \
+    || default_branch=""
+  if [[ -z "$default_branch" ]]; then
+    default_branch=$(git -C "$canonical" symbolic-ref --short HEAD 2>/dev/null || echo main)
+  fi
+  [[ -z "$default_branch" ]] && default_branch="main"
+
+  # Detect team-managed core.hooksPath override.
+  local local_hookspath
+  local_hookspath=$(git -C "$canonical" config --local --get core.hooksPath 2>/dev/null || true)
+  # Don't warn if the local hooksPath equals wt's own default (wt-managed, not team-managed).
+  if [[ "$local_hookspath" == "$HOME/.config/git/hooks" ]]; then local_hookspath=""; fi
+
+  local parent worktree_root
+  local default_config_branch default_config_root default_config_workspace
+default_config_branch=$(cfg_repo_get __defaults__ default_branch)
+default_config_root=$(cfg_repo_get "$safe_name" worktree_root)
+default_config_workspace=$(cfg_repo_get "$safe_name" herdr_workspace)
+
+  # Plan
+  cat >&2 <<EOF
+[wt onboard]
+  repo name:       $safe_name
+  canonical path:  $canonical
+  default branch:  $default_branch
+  base:            origin/$default_branch
+  worktree_root:   $default_config_root
+  herdr_workspace: $default_config_workspace
+  branch_patterns: inherited from defaults
+EOF
+  if [[ -n "$local_hookspath" ]]; then
+    cat >&2 <<EOF
+
+  $(yellow NOTE:) local core.hooksPath = '$local_hookspath' (team-managed).
+  wt will respect this. Push-time/commit-time hook enforcement will NOT apply
+  in this repo, but CLI commands (wt new, adopt, reap, etc.) will work.
+EOF
+  fi
+
+  if (( yes == 0 )); then
+    printf '\n[wt onboard] proceed? [y/N] ' >&2
+    local ans; read -r ans || ans=""
+    [[ "$ans" == "y" || "$ans" == "Y" ]] || die 10 "aborted"
+  fi
+
+  # Append compact repo config. Defaults provide worktree_root/base/default_branch/herdr_workspace/patterns.
+  if [[ -z "$existing" || "$existing" == "null" ]]; then
+    REPO="$safe_name" VALUE="$canonical" yq -i '.repos[strenv(REPO)].path = strenv(VALUE)' "$WT_CONFIG"
+    if [[ "$default_branch" != "$default_config_branch" ]]; then
+      REPO="$safe_name" VALUE="$default_branch" yq -i '.repos[strenv(REPO)].default_branch = strenv(VALUE)' "$WT_CONFIG"
+      REPO="$safe_name" VALUE="origin/$default_branch" yq -i '.repos[strenv(REPO)].base = strenv(VALUE)' "$WT_CONFIG"
+    fi
+  fi
+  _CFG_LOADED=0   # invalidate cache after config write
+  # Regenerate path cache so hooks/prompt pick up the new repo.
+  generate_path_cache
+  green "added "
+  printf 'repo=%s path=%s\n' "$safe_name" "$canonical"
+}
+cmd_help() {
+  cat <<EOF
+wt $WT_VERSION — worktree CLI
+
+  wt new <branch>              create new worktree branched from <base>
+  wt adopt <branch> [--id <id>]  move an existing branch into a worktree
+  wt pr <number>               create worktree for inbound PR (fetches pull/<n>/head)
+  wt list                      list worktrees per configured repo
+  wt status [--refresh]        list + reap-eligibility (clean/pushed/reachable/tab)
+  wt reap [--force] [--dry-run] <id>...  remove worktree + close tab + delete branch
+  wt cd <id>                   print absolute worktree path (use: cd "\$(wt cd ABC-123)")
+  wt focus <id>                focus herdr tab for worktree
+  wt resume <id>               focus or create tab, then print cd command
+  wt close-tab [--force] <id>  close herdr tab only; keep worktree + branch
+  wt tidy [--refresh]          group worktrees by cleanup action
+  wt audit [--no-fetch]        list unmerged worktree branches (TSV, machine-readable)
+  wt repair                    reconcile drift (missing tabs, orphan tabs, stale locks)
+  wt doctor [--install-hooks]  self-check; --install-hooks (re)writes the path cache
+  wt onboard [<path>] [--name <n>] [--yes]  add a git repo to ~/.config/wt/config.yaml (defaults to \$PWD)
+
+Config: $WT_CONFIG
+Cache:  $WT_CACHE
+Spec:   ~/.pai/plans/wt-worktree-cli.md
+Emergency push bypass: git push --no-verify
+EOF
+}
+
+# ---------- dispatch ----------
+main() {
+  require_deps
+  local sub="${1:-help}"
+  shift || true
+  case "$sub" in
+    new) cmd_new "$@" ;;
+    adopt) cmd_adopt "$@" ;;
+    pr) cmd_pr "$@" ;;
+    list|ls) cmd_list "$@" ;;
+    status|st) cmd_status "$@" ;;
+    reap|rm) cmd_reap "$@" ;;
+    cd) cmd_cd "$@" ;;
+    focus) cmd_focus "$@" ;;
+    resume) cmd_resume "$@" ;;
+    close-tab|close) cmd_close_tab "$@" ;;
+    tidy) cmd_tidy "$@" ;;
+    audit) cmd_audit "$@" ;;
+    repair) cmd_repair "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    onboard) cmd_onboard "$@" ;;
+    -h|--help|help) cmd_help ;;
+    --version|-V) echo "wt $WT_VERSION" ;;
+    *) cmd_help; exit 10 ;;
+  esac
+}
+
+main "$@"
