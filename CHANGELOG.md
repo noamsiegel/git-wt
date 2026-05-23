@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] — plugin interface (stage 1 of two-stage herdr extraction)
+
+### Added
+- **Plugin interface (`git-wt.plugin.v0` draft contract).** Plugins are executables named `wt-<name>` installed under `$WT_PLUGIN_DIR` (default `~/.local/share/git-wt/plugins/`), with a sibling `wt-plugin.json` manifest declaring `api_version`, `name`, `executable`, `events`, `version`. Core fires four lifecycle events as JSON on stdin: `wt:worktree-created`, `wt:worktree-removed`, `wt:focus`, `wt:list`. Plugin failures warn but never fail git operations.
+- **`wt plugin` subcommand** with `install`, `link`, `list`, `enable`, `disable`, `remove`, `emit`, `health` operations. See `wt plugin --help`.
+- **6 new bats tests** covering install/enable/disable/emit/remove/health.
+
+### Notes
+- Contract is explicitly `v0` (draft). May change before promoting to `v1` once a couple of external plugins validate it in practice.
+- Existing herdr behavior is unchanged. v0.4.0+ will extract bundled herdr to a separate `wt-herdr` plugin (stage 2).
+
 ## [0.2.1] — version-sync hotfix
 
 Fix `WT_VERSION` constant to match the release tag (was stuck at 0.1.0).

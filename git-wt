@@ -7,7 +7,14 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.2.1"
+WT_VERSION="0.3.0"
+
+# Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
+# under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
+# `wt plugin --help` for management and the README for the contract.
+WT_PLUGIN_API_VERSION="git-wt.plugin.v0"
+WT_PLUGIN_DIR=${WT_PLUGIN_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/git-wt/plugins}
+WT_PLUGIN_CONFIG=${WT_PLUGIN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/git-wt/plugins.json}
 
 red() { printf '\033[31m%b\033[0m' "$*"; }
 yellow() { printf '\033[33m%b\033[0m' "$*"; }
@@ -279,6 +286,143 @@ herdr_tab_status() {
   herdr tab list --workspace "$ws_id" 2>/dev/null \
     | yq -p json -r ".result.tabs[] | select(.tab_id == \"$tab_id\") | .agent_status" \
     | head -1
+}
+
+# ---------- plugin system ----------
+#
+# Plugins are executables named `wt-<name>` installed under
+# $WT_PLUGIN_DIR/wt-<name>/wt-<name>, with a sibling `wt-plugin.json` manifest:
+#
+#   {
+#     "api_version": "git-wt.plugin.v0",
+#     "name": "tmux",
+#     "executable": "wt-tmux",
+#     "events": ["wt:worktree-created","wt:worktree-removed","wt:focus","wt:list"],
+#     "version": "0.1.0"
+#   }
+#
+# Invocation contract:
+#   wt-<name> manifest                    → prints manifest JSON
+#   wt-<name> health                      → returns {"ok":true,...} or non-zero exit
+#   wt-<name> event <event-name> < json   → handles one event; output JSON optional
+#
+# Core never imports plugin functions; it only spawns plugin executables.
+
+# Resolve the wt-<name> executable path for an installed plugin. Empty if not found.
+wt_plugin_path() {
+  local name="$1"
+  local exe="$WT_PLUGIN_DIR/wt-$name/wt-$name"
+  [[ -x "$exe" ]] && printf '%s' "$exe"
+}
+
+# Parse a plugin's manifest. Caller redirects stderr if they want a quiet read.
+wt_plugin_manifest_read() {
+  local name="$1"
+  local mf="$WT_PLUGIN_DIR/wt-$name/wt-plugin.json"
+  [[ -r "$mf" ]] || return 1
+  cat "$mf"
+}
+
+# Is the named plugin enabled in WT_PLUGIN_CONFIG?
+wt_plugin_is_enabled() {
+  local name="$1"
+  [[ -r "$WT_PLUGIN_CONFIG" ]] || return 1
+  have yq || return 1
+  local enabled
+  enabled=$(yq -p json -o tsv ".enabled[]" "$WT_PLUGIN_CONFIG" 2>/dev/null || true)
+  [[ "$enabled" == *"$name"* ]] || return 1
+  printf '%s\n' "$enabled" | grep -Fxq "$name"
+}
+
+# List installed plugin names (directory names with `wt-` prefix, sans prefix).
+wt_plugin_list_installed() {
+  [[ -d "$WT_PLUGIN_DIR" ]] || return 0
+  local d
+  for d in "$WT_PLUGIN_DIR"/wt-*; do
+    [[ -d "$d" ]] || continue
+    basename "$d" | sed 's/^wt-//'
+  done
+}
+
+# Emit a lifecycle event to all enabled plugins that declare interest.
+# Best-effort: plugin failures warn but never fail the calling git operation.
+# Arguments:
+#   $1 — event name (e.g. wt:worktree-created)
+#   $2 — JSON payload string
+wt_plugin_emit() {
+  local event="$1" payload="$2"
+  [[ -d "$WT_PLUGIN_DIR" ]] || return 0
+  have yq || return 0
+  local name exe manifest
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    wt_plugin_is_enabled "$name" || continue
+    exe=$(wt_plugin_path "$name") || continue
+    [[ -n "$exe" ]] || continue
+    manifest=$(wt_plugin_manifest_read "$name" 2>/dev/null || true)
+    # Quietly skip plugins that don't declare this event.
+    if [[ -n "$manifest" ]]; then
+      if ! printf '%s' "$manifest" | yq -p json -o tsv ".events[]" 2>/dev/null | grep -Fxq "$event"; then
+        continue
+      fi
+    fi
+    printf '%s\n' "$payload" | "$exe" event "$event" >/dev/null 2>&1 \
+      || warn "plugin '$name' failed for $event"
+  done < <(wt_plugin_list_installed)
+}
+
+# JSON envelope helpers (avoid string escaping headaches; bash-safe basic values).
+# Caller pre-shell-escapes any user-controlled strings.
+wt_event_json_worktree_created() {
+  local id="$1" path="$2" branch="$3"
+  cat <<EOF
+{"api_version":"$WT_PLUGIN_API_VERSION","event":"wt:worktree-created","worktree":{"id":"$id","path":"$path","branch":"$branch"},"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+}
+
+wt_event_json_worktree_removed() {
+  local id="$1" path="$2" branch="$3" reason="${4:-remove}"
+  cat <<EOF
+{"api_version":"$WT_PLUGIN_API_VERSION","event":"wt:worktree-removed","worktree":{"id":"$id","path":"$path","branch":"$branch"},"reason":"$reason","timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+}
+
+wt_event_json_focus() {
+  local id="$1" path="$2" branch="$3"
+  cat <<EOF
+{"api_version":"$WT_PLUGIN_API_VERSION","event":"wt:focus","worktree":{"id":"$id","path":"$path","branch":"$branch"},"timestamp":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+}
+
+# Initialize the plugin config file if missing.
+wt_plugin_config_init() {
+  if [[ ! -f "$WT_PLUGIN_CONFIG" ]]; then
+    mkdir -p "$(dirname "$WT_PLUGIN_CONFIG")"
+    cat > "$WT_PLUGIN_CONFIG" <<EOF
+{
+  "api_version": "$WT_PLUGIN_API_VERSION",
+  "enabled": []
+}
+EOF
+  fi
+}
+
+# Add a name to the enabled list (idempotent).
+wt_plugin_config_enable() {
+  local name="$1"
+  wt_plugin_config_init
+  have yq || die 30 "yq required to manage plugin config"
+  if ! yq -p json -o tsv '.enabled[]' "$WT_PLUGIN_CONFIG" 2>/dev/null | grep -Fxq "$name"; then
+    yq -p json -o json -i ".enabled += [\"$name\"]" "$WT_PLUGIN_CONFIG"
+  fi
+}
+
+# Remove a name from the enabled list.
+wt_plugin_config_disable() {
+  local name="$1"
+  wt_plugin_config_init
+  have yq || die 30 "yq required to manage plugin config"
+  yq -p json -o json -i "del(.enabled[] | select(. == \"$name\"))" "$WT_PLUGIN_CONFIG"
 }
 
 # ---------- git helpers ----------
@@ -571,6 +715,9 @@ cmd_new() {
   else
     printf 'worktree=%s branch=%s id=%s (no tab — herdr unavailable)\n' "$target" "$branch" "$id"
   fi
+
+  # Plugin emit: best-effort dispatch to enabled plugins.
+  wt_plugin_emit "wt:worktree-created" "$(wt_event_json_worktree_created "$id" "$target" "$branch")"
 }
 
 cmd_adopt() {
@@ -659,6 +806,9 @@ cmd_adopt() {
   green "adopted "
   printf 'branch=%s worktree=%s id=%s tab in workspace=%s\n' "$branch" "$target" "$id" "$ws_name"
   info "canonical now parked on $(git_in "$canonical" rev-parse --abbrev-ref HEAD)"
+
+  # Plugin emit
+  wt_plugin_emit "wt:worktree-created" "$(wt_event_json_worktree_created "$id" "$target" "$branch")"
 }
 
 cmd_pr() {
@@ -709,6 +859,9 @@ cmd_pr() {
   fi
   green "fetched PR #$num "
   printf 'worktree=%s branch=%s\n' "$target" "$branch"
+
+  # Plugin emit
+  wt_plugin_emit "wt:worktree-created" "$(wt_event_json_worktree_created "$id" "$target" "$branch")"
 }
 
 cmd_list() {
@@ -928,6 +1081,9 @@ cmd_reap() {
     release_lock
     green "reaped "
     printf 'id=%s branch=%s\n' "$id" "$branch"
+
+    # Plugin emit: AFTER worktree removal so plugins can clean up tab state.
+    wt_plugin_emit "wt:worktree-removed" "$(wt_event_json_worktree_removed "$id" "$path" "$branch" "reap")"
   done
 }
 
@@ -959,6 +1115,11 @@ cmd_focus() {
   tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
   [[ -n "$tab_id" ]] || die 20 "no herdr tab for $path"
   herdr tab focus "$tab_id" >/dev/null && green "focused " && echo "$tab_id"
+
+  # Plugin emit
+  local branch
+  branch=$(git_in "$path" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  wt_plugin_emit "wt:focus" "$(wt_event_json_focus "$id" "$path" "$branch")"
 }
 
 
@@ -1248,6 +1409,209 @@ EOF
   green "added "
   printf 'repo=%s path=%s\n' "$safe_name" "$canonical"
 }
+cmd_plugin() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    install)
+      cmd_plugin_install "$@"
+      ;;
+    link)
+      cmd_plugin_link "$@"
+      ;;
+    list|ls)
+      cmd_plugin_list "$@"
+      ;;
+    enable)
+      cmd_plugin_enable "$@"
+      ;;
+    disable)
+      cmd_plugin_disable "$@"
+      ;;
+    remove|rm)
+      cmd_plugin_remove "$@"
+      ;;
+    emit)
+      cmd_plugin_emit_manual "$@"
+      ;;
+    health)
+      cmd_plugin_health "$@"
+      ;;
+    -h|--help|help|"")
+      cat <<EOF
+wt plugin — manage git-wt plugins (API: $WT_PLUGIN_API_VERSION)
+
+usage:
+  wt plugin install <repo>           clone wt-<name> plugin from github.com/<repo>
+  wt plugin link <path>              register a local checkout as a plugin (for dev)
+  wt plugin list                     installed plugins + enabled status
+  wt plugin enable <name>            add plugin to enabled set
+  wt plugin disable <name>           remove plugin from enabled set (keeps install)
+  wt plugin remove <name>            delete the installed plugin
+  wt plugin emit <name> <event>      manually fire an event to one plugin (debugging)
+  wt plugin health [<name>]          run \`<plugin> health\` and print result
+
+Plugin install path: $WT_PLUGIN_DIR
+Active set config:   $WT_PLUGIN_CONFIG
+
+See https://github.com/noamsiegel/git-wt#plugins for the contract.
+EOF
+      ;;
+    *)
+      die 10 "unknown subcommand: wt plugin $sub (try 'wt plugin --help')"
+      ;;
+  esac
+}
+
+cmd_plugin_install() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die 10 "usage: wt plugin install <owner/repo|url>"
+  # Normalize: bare 'tmux' → noamsiegel/wt-tmux; owner/repo as-is; URL as-is.
+  local url
+  if [[ "$repo" == http*://* ]]; then
+    url="$repo"
+  elif [[ "$repo" == */* ]]; then
+    url="https://github.com/$repo.git"
+  else
+    url="https://github.com/noamsiegel/wt-$repo.git"
+  fi
+  local name="${repo##*/}"
+  name="${name#wt-}"
+  local target="$WT_PLUGIN_DIR/wt-$name"
+
+  mkdir -p "$WT_PLUGIN_DIR"
+  if [[ -d "$target" ]]; then
+    die 20 "plugin 'wt-$name' is already installed at $target — remove it first"
+  fi
+
+  info "→ cloning $url → $target"
+  if ! git clone --depth 1 "$url" "$target" >/dev/null 2>&1; then
+    die 30 "git clone failed for $url"
+  fi
+
+  # Verify the plugin shape.
+  local exe="$target/wt-$name"
+  local manifest="$target/wt-plugin.json"
+  if [[ ! -x "$exe" ]]; then
+    rm -rf "$target"
+    die 20 "plugin clone is missing executable 'wt-$name' at the root"
+  fi
+  if [[ ! -r "$manifest" ]]; then
+    warn "plugin has no wt-plugin.json manifest; event routing will fall back to running every event"
+  fi
+
+  wt_plugin_config_enable "$name"
+  green "installed and enabled "
+  printf '%s\n' "$name"
+}
+
+cmd_plugin_link() {
+  local src="${1:-}"
+  [[ -n "$src" ]] || die 10 "usage: wt plugin link <path-to-plugin-checkout>"
+  src=$(realpath "$src" 2>/dev/null || die 20 "path not found: $1")
+  [[ -d "$src" ]] || die 20 "not a directory: $src"
+
+  local name
+  name=$(basename "$src")
+  name="${name#wt-}"
+
+  mkdir -p "$WT_PLUGIN_DIR"
+  local target="$WT_PLUGIN_DIR/wt-$name"
+  if [[ -e "$target" ]]; then
+    die 20 "plugin 'wt-$name' already linked/installed; remove it first"
+  fi
+
+  ln -s "$src" "$target"
+  wt_plugin_config_enable "$name"
+  green "linked and enabled "
+  printf '%s → %s\n' "$name" "$src"
+}
+
+cmd_plugin_list() {
+  if [[ ! -d "$WT_PLUGIN_DIR" ]]; then
+    echo "no plugins installed (plugin dir: $WT_PLUGIN_DIR)"
+    return 0
+  fi
+  printf '%-20s %-10s %-10s %s\n' NAME ENABLED KIND PATH
+  local name p kind enabled
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    p="$WT_PLUGIN_DIR/wt-$name"
+    if [[ -L "$p" ]]; then kind=link; else kind=clone; fi
+    if wt_plugin_is_enabled "$name"; then enabled="yes"; else enabled="no"; fi
+    printf '%-20s %-10s %-10s %s\n' "$name" "$enabled" "$kind" "$p"
+  done < <(wt_plugin_list_installed)
+}
+
+cmd_plugin_enable() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die 10 "usage: wt plugin enable <name>"
+  [[ -d "$WT_PLUGIN_DIR/wt-$name" ]] || die 20 "no plugin 'wt-$name' installed"
+  wt_plugin_config_enable "$name"
+  green "enabled "; printf '%s\n' "$name"
+}
+
+cmd_plugin_disable() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die 10 "usage: wt plugin disable <name>"
+  wt_plugin_config_disable "$name"
+  green "disabled "; printf '%s\n' "$name"
+}
+
+cmd_plugin_remove() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die 10 "usage: wt plugin remove <name>"
+  local target="$WT_PLUGIN_DIR/wt-$name"
+  [[ -e "$target" ]] || die 20 "no plugin 'wt-$name' installed"
+  wt_plugin_config_disable "$name" 2>/dev/null || true
+  if [[ -L "$target" ]]; then rm "$target"; else rm -rf "$target"; fi
+  green "removed "; printf '%s\n' "$name"
+}
+
+cmd_plugin_emit_manual() {
+  local name="${1:-}" event="${2:-}"
+  [[ -n "$name" && -n "$event" ]] || die 10 "usage: wt plugin emit <name> <event> [--id <id>]"
+  shift 2
+  local id="" path="" branch=""
+  while (($#)); do
+    case "$1" in
+      --id) id="${2:-}"; shift 2 ;;
+      --path) path="${2:-}"; shift 2 ;;
+      --branch) branch="${2:-}"; shift 2 ;;
+      *) die 10 "unknown flag: $1" ;;
+    esac
+  done
+  local exe; exe=$(wt_plugin_path "$name") || die 20 "no plugin 'wt-$name' installed"
+  [[ -n "$exe" ]] || die 20 "no plugin 'wt-$name' installed"
+  local payload
+  case "$event" in
+    wt:worktree-created) payload=$(wt_event_json_worktree_created "$id" "$path" "$branch") ;;
+    wt:worktree-removed) payload=$(wt_event_json_worktree_removed "$id" "$path" "$branch" "manual") ;;
+    wt:focus)            payload=$(wt_event_json_focus "$id" "$path" "$branch") ;;
+    *) die 10 "unknown event: $event" ;;
+  esac
+  info "→ sending $event to wt-$name"
+  printf '%s\n' "$payload" | "$exe" event "$event"
+}
+
+cmd_plugin_health() {
+  local name="${1:-}"
+  if [[ -n "$name" ]]; then
+    local exe; exe=$(wt_plugin_path "$name") || die 20 "no plugin 'wt-$name' installed"
+    [[ -n "$exe" ]] || die 20 "no plugin 'wt-$name' installed"
+    "$exe" health
+    return 0
+  fi
+  # No name → run health on every installed plugin.
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    local exe; exe=$(wt_plugin_path "$name") || continue
+    [[ -n "$exe" ]] || continue
+    printf '%s: ' "$name"
+    "$exe" health || true
+  done < <(wt_plugin_list_installed)
+}
+
 cmd_help() {
   cat <<EOF
 wt $WT_VERSION — worktree CLI
@@ -1269,6 +1633,7 @@ wt $WT_VERSION — worktree CLI
   wt onboard [<path>] [--name <n>] [--yes]  add a git repo to ~/.config/wt/config.yaml (defaults to \$PWD)
   wt version [--latest]        print version; --latest checks upstream
   wt upgrade                   git pull in the install dir + re-symlink
+  wt plugin <sub> [args]       manage plugins; \`wt plugin --help\` for details
 
 Config: $WT_CONFIG
 Cache:  $WT_CACHE
@@ -1392,6 +1757,7 @@ main() {
     onboard) cmd_onboard "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     version) cmd_version "$@" ;;
+    plugin) cmd_plugin "$@" ;;
     -h|--help|help) cmd_help ;;
     --version|-V) cmd_version ;;
     *) cmd_help; exit 10 ;;

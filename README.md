@@ -130,6 +130,35 @@ Example `.worktreeinclude`:
 
 Patterns support `*`, `?`, `**`. Comments start with `#`.
 
+## Plugins (v0.3.0+)
+
+git-wt fires four lifecycle events that plugins can subscribe to:
+`wt:worktree-created`, `wt:worktree-removed`, `wt:focus`, `wt:list`.
+Plugins are stand-alone executables named `wt-<name>` installed under
+`~/.local/share/git-wt/plugins/`. The contract is JSON-on-stdin so plugins
+can be written in any language.
+
+```bash
+# Install + enable a plugin
+wt plugin install tmux          # → noamsiegel/wt-tmux (if it exists)
+wt plugin install owner/wt-kitty
+
+# Manage
+wt plugin list
+wt plugin disable tmux
+wt plugin remove tmux
+
+# Develop a plugin locally
+wt plugin link /path/to/wt-mything   # symlinks instead of cloning
+wt plugin emit mything wt:focus --id repo--feature-x   # manually fire one event
+```
+
+A reference plugin (`wt-herdr`) will ship in v0.4.0+ once the v0 contract has
+been validated by a couple of external plugins. Until then, herdr behavior is
+bundled directly in git-wt — no plugin install required.
+
+The contract is documented in CHANGELOG.md and is **explicitly draft (`git-wt.plugin.v0`)**.
+
 ## Bypass / escape hatches
 
 | Goal | How |
