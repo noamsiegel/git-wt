@@ -1,0 +1,87 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump'
+        type: choice
+        options: [patch, minor, major]
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.tag.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute next version
+        id: tag
+        run: |
+          latest=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          case "${{ inputs.version_bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          new_tag="v${major}.${minor}.${patch}"
+          echo "tag_name=$new_tag" >> "$GITHUB_OUTPUT"
+          echo "Bumping from $latest to $new_tag"
+
+      - name: Verify CHANGELOG entry for new version
+        run: |
+          if ! grep -q "## \[${{ steps.tag.outputs.tag_name }}\]" CHANGELOG.md && \
+             ! grep -q "## ${{ steps.tag.outputs.tag_name }}" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md does not contain an entry for ${{ steps.tag.outputs.tag_name }}. Add one before releasing."
+            exit 1
+          fi
+
+      - name: Sync WT_VERSION in source
+        run: |
+          ver="${{ steps.tag.outputs.tag_name }}"
+          ver="${ver#v}"
+          sed -i "s/^WT_VERSION=.*/WT_VERSION=\"$ver\"/" git-wt
+          if ! git diff --quiet git-wt; then
+            git config user.email "noam@noamsiegel.com"
+            git config user.name "Noam Siegel"
+            git add git-wt
+            git commit -m "chore: bump WT_VERSION to $ver"
+            git push
+          fi
+
+      - name: Create annotated tag
+        run: |
+          git tag -a "${{ steps.tag.outputs.tag_name }}" -m "${{ steps.tag.outputs.tag_name }}"
+          git push origin "${{ steps.tag.outputs.tag_name }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag_name }}" \
+            --title "${{ steps.tag.outputs.tag_name }}" \
+            --notes-from-tag \
+            --verify-tag
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          formula-name: git-wt
+          formula-path: Formula/git-wt.rb
+          homebrew-tap: noamsiegel/homebrew-tap
+          tag-name: ${{ needs.release.outputs.tag_name }}
+          download-url: https://github.com/noamsiegel/git-wt/archive/refs/tags/${{ needs.release.outputs.tag_name }}.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
