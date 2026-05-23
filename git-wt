@@ -293,6 +293,65 @@ wt_dir_registered() {
   git_in "$canonical" worktree list --porcelain | grep -q "^worktree $path$"
 }
 
+# Copy gitignored files matching .worktreeinclude patterns from canonical
+# to a freshly-created worktree. Compatible with the Claude Code /
+# VS Code convention: only files that are BOTH (a) gitignored and
+# (b) match a pattern in .worktreeinclude are copied. Tracked files are
+# never duplicated.
+#
+# Patterns are gitignore-style (one per line, # for comments). Resolution
+# uses `git check-ignore` against each candidate file under the canonical
+# tree.
+copy_worktreeinclude_files() {
+  local canonical="$1" target="$2"
+  local include_file="$canonical/.worktreeinclude"
+  [[ -r "$include_file" ]] || return 0
+
+  # Read patterns, strip blanks and comments.
+  local -a patterns=()
+  while IFS= read -r line; do
+    line="${line%%#*}"        # strip trailing comment
+    line="${line#"${line%%[![:space:]]*}"}"  # ltrim
+    line="${line%"${line##*[![:space:]]}"}"  # rtrim
+    [[ -z "$line" ]] && continue
+    patterns+=("$line")
+  done < "$include_file"
+  (( ${#patterns[@]} == 0 )) && return 0
+
+  info "$(dim "→ .worktreeinclude: copying ignored files (${#patterns[@]} pattern(s))")"
+
+  # For each pattern, expand under canonical and copy only matches that are
+  # gitignored. `git ls-files --others --ignored --exclude-standard` enumerates
+  # gitignored files in canonical; we intersect with the patterns.
+  local count=0
+  local relpath matched p
+  while IFS= read -r -d '' relpath; do
+    matched=0
+    for p in "${patterns[@]}"; do
+      case "$relpath" in
+        $p|$p/*|*/$p|*/$p/*) matched=1; break ;;
+      esac
+      if [[ "$p" == \*\*/* ]]; then
+        local suffix="${p#**/}"
+        case "$relpath" in
+          $suffix|*/$suffix) matched=1; break ;;
+        esac
+      fi
+    done
+    (( matched == 0 )) && continue
+
+    local src="$canonical/$relpath"
+    local dst="$target/$relpath"
+    mkdir -p "$(dirname "$dst")"
+    cp -p "$src" "$dst" 2>/dev/null || continue
+    count=$((count + 1))
+  done < <(git_in "$canonical" ls-files --others --ignored --exclude-standard -z 2>/dev/null)
+
+  if (( count > 0 )); then
+    info "$(dim "→ copied $count ignored file(s) to worktree")"
+  fi
+}
+
 is_clean() {
   local wt="$1"
   [[ -z "$(git_in "$wt" status --porcelain 2>/dev/null)" ]]
@@ -488,6 +547,11 @@ cmd_new() {
   fi
   # New branches have no upstream until first push. Unset the auto-track that `git worktree add -b` sets.
   git_in "$target" branch --unset-upstream 2>/dev/null || true
+
+  # .worktreeinclude: copy gitignored files matching patterns from canonical
+  # into the new worktree. Compatible with Claude Code and VS Code's convention.
+  # Only gitignored files are copied — tracked files are never duplicated.
+  copy_worktreeinclude_files "$canonical" "$target"
 
   if herdr_available; then
     info "$(dim "→ creating herdr tab in workspace '$ws_name'")"
@@ -1203,12 +1267,106 @@ wt $WT_VERSION — worktree CLI
   wt repair                    reconcile drift (missing tabs, orphan tabs, stale locks)
   wt doctor [--install-hooks]  self-check; --install-hooks (re)writes the path cache
   wt onboard [<path>] [--name <n>] [--yes]  add a git repo to ~/.config/wt/config.yaml (defaults to \$PWD)
+  wt version [--latest]        print version; --latest checks upstream
+  wt upgrade                   git pull in the install dir + re-symlink
 
 Config: $WT_CONFIG
 Cache:  $WT_CACHE
 Spec:   ~/.pai/plans/wt-worktree-cli.md
 Emergency push bypass: git push --no-verify
 EOF
+}
+
+# ---------- upgrade / version ----------
+
+# Resolve the directory where the wt binary lives. Follows the symlink
+# chain so the user can install wt via a symlink (~/.local/bin/wt → ...).
+wt_install_dir() {
+  local self
+  self=$(realpath "$0" 2>/dev/null || echo "$0")
+  dirname "$self"
+}
+
+cmd_version() {
+  local check_latest=0
+  while (($#)); do
+    case "$1" in
+      --latest) check_latest=1; shift ;;
+      *) die 10 "unknown flag: $1" ;;
+    esac
+  done
+  echo "wt $WT_VERSION"
+  (( check_latest == 0 )) && return 0
+
+  # Check upstream. Use the install dir's git remote if it's a clone, else
+  # fall back to the canonical upstream.
+  local install_dir upstream_sha local_sha
+  install_dir=$(wt_install_dir)
+  if [[ -d "$install_dir/.git" ]] || [[ -f "$install_dir/.git" ]]; then
+    local_sha=$(git -C "$install_dir" rev-parse HEAD 2>/dev/null || echo "")
+    upstream_sha=$(git -C "$install_dir" ls-remote origin HEAD 2>/dev/null | awk '{print $1}' || echo "")
+  else
+    # Not a git checkout; query upstream directly.
+    upstream_sha=$(git ls-remote https://github.com/noamsiegel/git-wt.git HEAD 2>/dev/null | awk '{print $1}' || echo "")
+  fi
+
+  if [[ -z "$upstream_sha" ]]; then
+    yellow "warn:" >&2; echo " could not reach upstream (network/GitHub down?)" >&2
+    return 0
+  fi
+  if [[ -n "$local_sha" && "$local_sha" != "$upstream_sha" ]]; then
+    yellow "update available" >&2
+    printf '  local:    %s\n' "$local_sha" >&2
+    printf '  upstream: %s\n' "$upstream_sha" >&2
+    printf '  run: wt upgrade\n' >&2
+  elif [[ "$local_sha" == "$upstream_sha" ]]; then
+    green "up to date " >&2; echo "($local_sha)" >&2
+  else
+    green "upstream HEAD: " >&2; echo "$upstream_sha (not a local clone — install via clone+symlink to enable wt upgrade)" >&2
+  fi
+}
+
+cmd_upgrade() {
+  local install_dir
+  install_dir=$(wt_install_dir)
+  if [[ ! -d "$install_dir/.git" ]] && [[ ! -f "$install_dir/.git" ]]; then
+    die 30 "wt is not installed via a git clone — cannot auto-upgrade.
+Install method that supports upgrades:
+  git clone https://github.com/noamsiegel/git-wt.git ~/.local/share/git-wt
+  ln -sf ~/.local/share/git-wt/git-wt ~/.local/bin/wt
+Or upgrade manually by re-installing from https://github.com/noamsiegel/git-wt"
+  fi
+
+  info "→ install dir: $install_dir"
+  local before_sha after_sha
+  before_sha=$(git -C "$install_dir" rev-parse HEAD)
+
+  info "→ git fetch origin"
+  if ! git -C "$install_dir" fetch --quiet origin; then
+    die 30 "git fetch failed — network/permissions?"
+  fi
+
+  # Check for dirty worktree before pull.
+  if ! git -C "$install_dir" diff --quiet HEAD --; then
+    yellow "warn:" >&2; echo " install dir has local modifications — refusing to pull. Stash/commit first." >&2
+    exit 30
+  fi
+
+  info "→ git pull --ff-only"
+  if ! git -C "$install_dir" pull --ff-only --quiet origin; then
+    die 30 "git pull failed — branch may have diverged. Resolve manually in $install_dir"
+  fi
+
+  after_sha=$(git -C "$install_dir" rev-parse HEAD)
+  if [[ "$before_sha" == "$after_sha" ]]; then
+    green "already up to date "; echo "($after_sha)"
+    return 0
+  fi
+
+  green "upgraded "; printf '%s → %s\n' "$before_sha" "$after_sha"
+
+  # Re-run version to show the new version + any release-note hint.
+  "$0" version
 }
 
 # ---------- dispatch ----------
@@ -1232,8 +1390,10 @@ main() {
     repair) cmd_repair "$@" ;;
     doctor) cmd_doctor "$@" ;;
     onboard) cmd_onboard "$@" ;;
+    upgrade) cmd_upgrade "$@" ;;
+    version) cmd_version "$@" ;;
     -h|--help|help) cmd_help ;;
-    --version|-V) echo "wt $WT_VERSION" ;;
+    --version|-V) cmd_version ;;
     *) cmd_help; exit 10 ;;
   esac
 }

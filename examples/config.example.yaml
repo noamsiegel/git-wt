@@ -13,6 +13,13 @@ defaults:
     - "^yourname/[a-z0-9-]+$"
     - "^yourname/[A-Z]+-[0-9]+-[a-z0-9-]+$"
     - "^pr-[0-9]+$"
+  # Protected refs (block direct push). Each entry is an EXACT branch name OR
+  # a regex (auto-detected: starts with ^ or contains *?+|()[]{}\). Read by
+  # guardrails branch-guard when running inside a wt-managed repo.
+  protected_refs:
+    - main
+    - master
+    - "^release/.*$"
 
 hooks:
   # Whether `wt pre-push` enforces branch_patterns. Opt-in.

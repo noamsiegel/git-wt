@@ -69,6 +69,8 @@ wt cd AUTH-123                    # print absolute worktree path
 wt adopt feature/wip              # move an existing branch into a worktree
 wt reap AUTH-123                  # clean up worktree, remove branch
 wt doctor                         # diagnose setup, dependencies, hook wiring
+wt upgrade                        # git pull in the install dir
+wt version --latest               # check upstream for updates
 ```
 
 ## Configuration
@@ -107,6 +109,26 @@ dispatcher (`_wt-chain`) for everything else. Each hook:
 This composes cleanly with existing per-repo hook systems (Husky, lefthook,
 pre-commit framework, custom orchestrators) without needing to know about
 them.
+
+## Copying gitignored files into worktrees (`.worktreeinclude`)
+
+`wt new` copies gitignored files matching patterns in `<canonical>/.worktreeinclude`
+into the new worktree. Format matches Claude Code's and VS Code's conventions:
+**only files that are BOTH gitignored AND match a pattern are copied.** Tracked
+files are never duplicated.
+
+Example `.worktreeinclude`:
+
+```
+# Copy local env into every worktree
+.env
+.env.local
+
+# Copy local IDE settings
+.vscode/settings.json
+```
+
+Patterns support `*`, `?`, `**`. Comments start with `#`.
 
 ## Bypass / escape hatches
 

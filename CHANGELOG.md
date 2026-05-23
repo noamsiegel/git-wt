@@ -28,5 +28,19 @@ All notable changes to this project will be documented in this file.
 ### Herdr is optional
 - `herdr` is **fully optional**. When not installed, wt warns once (silenceable with `WT_QUIET_HERDR=1`) and core commands (`new`, `adopt`, `pr`, `list`, `status`, `cd`, `reap`, `tidy`, `audit`, `repair`, `doctor`, `init`, `onboard`) all work — they just skip tab creation/binding. Commands that require tabs (`focus`, `close-tab`, `resume`) explicitly die with a useful message when herdr is absent.
 
+### `.worktreeinclude` (Claude Code / VS Code compatibility)
+- `wt new` reads `<canonical>/.worktreeinclude` and copies matching gitignored files into the new worktree. Tracked files are never duplicated. Matches the conventions used by Claude Code and VS Code's git extension.
+
+### Versioning and self-update
+- `wt version` prints the current version. `wt version --latest` compares against upstream `HEAD` and reports drift.
+- `wt upgrade` runs `git fetch && git pull --ff-only` in the install dir (must be a git clone).
+
+### Branch policy unification
+- `protected_refs` (newline list of literals or regex) can now live in `~/.config/wt/config.yaml` under `defaults` or per-repo. The guardrails personal hook layer reads it automatically when running in a wt-managed repo. Env vars (`PROTECTED_BRANCHES_LIST`, `PROTECTED_BRANCH_REGEX`) remain as fallback for non-wt repos.
+
+### Security hardening (this release)
+- C4: post-commit autopush now runs the FULL guardrails pre-push (not just branch-guard) before launching the background push, and pushes by HEAD SHA instead of branch name to close the TOCTOU window.
+- C5: `WT_HOOK_NEXT` realpath is validated against the repo's `.git/hooks/` dir before honoring the recursion-skip. An attacker setting both `WT_HOOK_RUNNING=1` and `WT_HOOK_NEXT=/bin/true` can no longer bypass the chain.
+
 ### Not in this release
 - A `wt` Homebrew formula. Install via clone + symlink for now.
