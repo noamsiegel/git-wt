@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.3.0"
+WT_VERSION="0.4.0"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -41,14 +41,26 @@ require_deps() {
   # herdr is optional. Cache availability once so helpers can degrade quietly.
   if have herdr; then
     WT_HAS_HERDR=1
+    # Deprecation notice for v0.4.0. In v0.5.0 the bundled herdr code will be
+    # removed; the wt-herdr plugin (https://github.com/noamsiegel/wt-herdr)
+    # becomes the only way to manage tabs. Silence with WT_QUIET_HERDR=1 or
+    # adopt early via WT_PLUGIN_ONLY=1 + `wt plugin install herdr`.
+    if [[ "${WT_QUIET_HERDR:-0}" != "1" ]] && [[ "${WT_PLUGIN_ONLY:-0}" != "1" ]]; then
+      warn "bundled herdr code is deprecated; will be removed in git-wt v0.5.0. Run \`wt plugin install herdr\` and set WT_PLUGIN_ONLY=1 to adopt early. Silence: WT_QUIET_HERDR=1."
+    fi
   else
     WT_HAS_HERDR=0
-    [[ "${WT_QUIET_HERDR:-0}" == "1" ]] || warn "herdr not found — tab management disabled (set WT_QUIET_HERDR=1 to silence this warning)."
+    [[ "${WT_QUIET_HERDR:-0}" == "1" ]] || warn "herdr not found — tab management disabled (set WT_QUIET_HERDR=1 to silence)."
   fi
 }
 
 # True iff herdr is installed AND its server is reachable.
-herdr_available() { [[ "${WT_HAS_HERDR:-0}" == "1" ]]; }
+# In v0.4.0+: also false when WT_PLUGIN_ONLY=1 (force plugin-only mode for users
+# who have installed wt-herdr and want the bundled code to no-op).
+herdr_available() {
+  [[ "${WT_PLUGIN_ONLY:-0}" == "1" ]] && return 1
+  [[ "${WT_HAS_HERDR:-0}" == "1" ]]
+}
 
 # ---------- config helpers ----------
 # ---------- config (cached) ----------

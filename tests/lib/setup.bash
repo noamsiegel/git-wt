@@ -30,7 +30,7 @@ wt_test_setup() {
   git -C "$FIX/canonical" config user.name "Test"
   git -C "$FIX/canonical" config commit.gpgsign false
   git -C "$FIX/canonical" config core.hooksPath "$HOME/.config/git/hooks"
-  git -C "$FIX/canonical" commit --quiet --allow-empty -m "init"
+  SKIP_PERSONAL_HOOKS=1 git -C "$FIX/canonical" commit --quiet --allow-empty -m "feat: init"
   git -C "$FIX/canonical" branch -M main
   git -C "$FIX/canonical" push --quiet -u origin main >/dev/null 2>&1
 
@@ -41,7 +41,7 @@ wt_test_setup() {
   git -C "$FIX/canonical2" config user.name "Test"
   git -C "$FIX/canonical2" config commit.gpgsign false
   git -C "$FIX/canonical2" config core.hooksPath "$HOME/.config/git/hooks"
-  git -C "$FIX/canonical2" commit --quiet --allow-empty -m "init"
+  SKIP_PERSONAL_HOOKS=1 git -C "$FIX/canonical2" commit --quiet --allow-empty -m "feat: init"
   git -C "$FIX/canonical2" branch -M main
   git -C "$FIX/canonical2" push --quiet -u origin main >/dev/null 2>&1
 

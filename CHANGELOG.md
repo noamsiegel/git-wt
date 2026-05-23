@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] — wt-herdr plugin available; bundled herdr deprecated
+
+### Added
+- **`wt plugin install herdr`** now clones [noamsiegel/wt-herdr](https://github.com/noamsiegel/wt-herdr), the reference implementation of the `git-wt.plugin.v0` contract for herdr tab management.
+- **`WT_PLUGIN_ONLY=1`** environment variable. When set, the bundled herdr code in git-wt core becomes a no-op; the wt-herdr plugin is the only thing managing tabs. Use this to validate the plugin-only future before v0.5.0 removes the bundled code.
+
+### Deprecated
+- The bundled herdr code in `git-wt` core. It still works (default behavior) but `require_deps` now prints a deprecation warning. Silence with `WT_QUIET_HERDR=1`. The code will be deleted in v0.5.0; install the wt-herdr plugin and set `WT_PLUGIN_ONLY=1` to adopt early.
+
+### Notes
+- This is the **bridge release** to the plugin-only future. v0.5.0 will remove ~300 lines of herdr-specific bash from `git-wt` core and require the plugin.
+- The `git-wt.plugin.v0` contract is unchanged from v0.3.0; wt-herdr is the reference implementation.
+
 ## [0.3.0] — plugin interface (stage 1 of two-stage herdr extraction)
 
 ### Added
