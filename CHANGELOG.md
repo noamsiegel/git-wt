@@ -22,9 +22,11 @@ All notable changes to this project will be documented in this file.
 - Autopush gating: post-commit runs guardrails branch-guard against synthesized pre-push input before launching the background push.
 
 ### Known limitations
-- `herdr` is required for tab management. Core worktree operations work without it (warning instead of fatal), but `wt new` / `focus` / `resume` / `close-tab` require herdr. Future release will fully gate herdr behind feature detection.
 - macOS only (heavily tested). Linux probably works but untested in CI.
 - bash >= 4 required (macOS's system bash 3.2 is not enough).
+
+### Herdr is optional
+- `herdr` is **fully optional**. When not installed, wt warns once (silenceable with `WT_QUIET_HERDR=1`) and core commands (`new`, `adopt`, `pr`, `list`, `status`, `cd`, `reap`, `tidy`, `audit`, `repair`, `doctor`, `init`, `onboard`) all work — they just skip tab creation/binding. Commands that require tabs (`focus`, `close-tab`, `resume`) explicitly die with a useful message when herdr is absent.
 
 ### Not in this release
 - A `wt` Homebrew formula. Install via clone + symlink for now.

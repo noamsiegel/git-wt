@@ -28,14 +28,20 @@ require_deps() {
   have yq || die 30 "yq not found. Install via 'brew install yq' (mikefarah/yq)."
   yq --version 2>&1 | grep -q mikefarah || die 30 "wrong yq dialect; need mikefarah/yq"
   have git || die 30 "git not found"
-  # herdr is optional: tab management is skipped when unavailable.
-  # Core worktree commands (new, list, status, reap, doctor) still work.
-  if ! have herdr; then
-    warn "herdr not found — tab management will be skipped. Install: see README."
-  fi
   have realpath || die 30 "realpath not found"
   [[ -r "$WT_CONFIG" ]] || die 30 "config not readable: $WT_CONFIG"
+
+  # herdr is optional. Cache availability once so helpers can degrade quietly.
+  if have herdr; then
+    WT_HAS_HERDR=1
+  else
+    WT_HAS_HERDR=0
+    [[ "${WT_QUIET_HERDR:-0}" == "1" ]] || warn "herdr not found — tab management disabled (set WT_QUIET_HERDR=1 to silence this warning)."
+  fi
 }
+
+# True iff herdr is installed AND its server is reachable.
+herdr_available() { [[ "${WT_HAS_HERDR:-0}" == "1" ]]; }
 
 # ---------- config helpers ----------
 # ---------- config (cached) ----------
@@ -217,9 +223,13 @@ release_lock() {
 }
 
 # ---------- herdr helpers ----------
-herdr_server_up() { herdr status server 2>/dev/null | grep -q '^status: running'; }
+herdr_server_up() {
+  herdr_available || return 1
+  herdr status server 2>/dev/null | grep -q '^status: running'
+}
 
 herdr_ws_id() {
+  herdr_available || { echo ""; return 0; }
   local label="$1"
   herdr workspace list 2>/dev/null \
     | yq -p json -r ".result.workspaces[] | select(.label == \"$label\") | .workspace_id" \
@@ -227,6 +237,7 @@ herdr_ws_id() {
 }
 
 herdr_ensure_ws() {
+  herdr_available || { echo ""; return 0; }
   local label="$1" ws_id
   ws_id=$(herdr_ws_id "$label")
   if [[ -z "$ws_id" ]]; then
@@ -240,25 +251,30 @@ herdr_ensure_ws() {
 
 # Find a pane in a workspace whose cwd (realpath-resolved) matches target.
 herdr_pane_for_cwd() {
+  herdr_available || { echo ""; return 0; }
   local ws_id="$1" target="$2" rp_target
+  [[ -z "$ws_id" ]] && { echo ""; return 0; }
   rp_target=$(rp "$target")
   herdr pane list --workspace "$ws_id" 2>/dev/null \
     | yq -p json -r ".result.panes[] | select(.cwd == \"$target\" or .cwd == \"$rp_target\") | .tab_id" \
     | head -1
 }
 herdr_create_tab() {
+  herdr_available || return 1
   local ws_id="$1" cwd="$2" label="$3"
   herdr tab create --workspace "$ws_id" --cwd "$cwd" --label "$label" --focus >/dev/null \
     || return 1
 }
 
 herdr_close_tab() {
+  herdr_available || return 1
   local tab_id="$1"
   herdr tab close "$tab_id" >/dev/null 2>&1 || return 1
 }
 
 # Returns "working", "idle", "blocked", "unknown", or "" if no tab.
 herdr_tab_status() {
+  herdr_available || { echo ""; return 0; }
   local ws_id="$1" tab_id="$2"
   herdr tab list --workspace "$ws_id" 2>/dev/null \
     | yq -p json -r ".result.tabs[] | select(.tab_id == \"$tab_id\") | .agent_status" \
@@ -315,8 +331,10 @@ cmd_doctor() {
   printf '%-40s' "bash >= 4"; if (( BASH_VERSINFO[0] >= 4 )); then green "PASS\n"; else red "FAIL\n"; fail=1; fi
   printf '%-40s' "yq (mikefarah/yq)"; if yq --version 2>&1 | grep -q mikefarah; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
   printf '%-40s' "git available"; if have git; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
-  printf '%-40s' "herdr available"; if have herdr; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
-  printf '%-40s' "herdr server running"; if herdr_server_up; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  printf '%-40s' "herdr available (optional)"; if have herdr; then green "PASS\n"; else yellow "SKIPPED (tabs disabled)\n"; fi
+  if have herdr; then
+    printf '%-40s' "herdr server running"; if herdr_server_up; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  fi
   printf '%-40s' "config readable"; if [[ -r "$WT_CONFIG" ]]; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
 
   local repo path default
@@ -450,7 +468,10 @@ cmd_new() {
 
   guard_forbidden "$target"
   [[ -d "$canonical/.git" || -f "$canonical/.git" ]] || die 20 "canonical $canonical is not a git repo"
-  herdr_server_up || die 30 "herdr server not running (need it for 1:1 tab binding)"
+  # Tab binding is optional: required only when herdr is installed.
+  if herdr_available && ! herdr_server_up; then
+    die 30 "herdr is installed but its server is not running (start herdr server, or uninstall to skip tab binding)"
+  fi
 
   acquire_lock "$wt_root"
   [[ -e "$target" ]] && die 20 "target path already exists: $target"
@@ -468,18 +489,24 @@ cmd_new() {
   # New branches have no upstream until first push. Unset the auto-track that `git worktree add -b` sets.
   git_in "$target" branch --unset-upstream 2>/dev/null || true
 
-  info "$(dim "→ creating herdr tab in workspace '$ws_name'")"
-  local ws_id
-  ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
-  if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
-    warn "herdr tab create failed — rolling back"
-    git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
-    git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
-    die 50 "rolled back worktree+branch due to herdr failure"
+  if herdr_available; then
+    info "$(dim "→ creating herdr tab in workspace '$ws_name'")"
+    local ws_id
+    ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
+    if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
+      warn "herdr tab create failed — rolling back"
+      git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
+      git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
+      die 50 "rolled back worktree+branch due to herdr failure"
+    fi
   fi
 
   green "created "
-  printf 'worktree=%s branch=%s id=%s tab in workspace=%s\n' "$target" "$branch" "$id" "$ws_name"
+  if herdr_available; then
+    printf 'worktree=%s branch=%s id=%s tab in workspace=%s\n' "$target" "$branch" "$id" "$ws_name"
+  else
+    printf 'worktree=%s branch=%s id=%s (no tab — herdr unavailable)\n' "$target" "$branch" "$id"
+  fi
 }
 
 cmd_adopt() {
@@ -511,7 +538,9 @@ cmd_adopt() {
   target="$wt_root/$id"
 
   guard_forbidden "$target"
-  herdr_server_up || die 30 "herdr server not running"
+  if herdr_available && ! herdr_server_up; then
+    die 30 "herdr is installed but its server is not running"
+  fi
 
   # Preflight
   branch_exists_local "$canonical" "$branch" || die 20 "branch '$branch' does not exist locally in $canonical"
@@ -542,14 +571,16 @@ cmd_adopt() {
     git_in "$canonical" switch "$original_branch" >/dev/null 2>&1 || true
     die 1 "git worktree add failed"
   fi
-  info "$(dim "→ creating herdr tab in workspace '$ws_name'")"
-  local ws_id
-  ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
-  if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
-    warn "herdr tab create failed — rolling back"
-    git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
-    git_in "$canonical" switch "$original_branch" >/dev/null 2>&1 || true
-    die 50 "rolled back due to herdr failure"
+  if herdr_available; then
+    info "$(dim "→ creating herdr tab in workspace '$ws_name'")"
+    local ws_id
+    ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
+    if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
+      warn "herdr tab create failed — rolling back"
+      git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
+      git_in "$canonical" switch "$original_branch" >/dev/null 2>&1 || true
+      die 50 "rolled back due to herdr failure"
+    fi
   fi
 
   # Park canonical on default_branch
@@ -585,7 +616,9 @@ cmd_pr() {
   target="$wt_root/$id"
   validate_branch_shape "$repo" "$branch"
   guard_forbidden "$target"
-  herdr_server_up || die 30 "herdr server not running"
+  if herdr_available && ! herdr_server_up; then
+    die 30 "herdr is installed but its server is not running"
+  fi
 
   acquire_lock "$wt_root"
   [[ -e "$target" ]] && die 20 "target path already exists: $target"
@@ -600,13 +633,15 @@ cmd_pr() {
     git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
     die 1 "git worktree add failed"
   fi
-  local ws_id
-  ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
-  if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
-    warn "herdr tab create failed — rolling back"
-    git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
-    git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
-    die 50 "rolled back due to herdr failure"
+  if herdr_available; then
+    local ws_id
+    ws_id=$(herdr_ensure_ws "$ws_name") || ws_id=""
+    if [[ -z "$ws_id" ]] || ! herdr_create_tab "$ws_id" "$(rp "$target")" "$id"; then
+      warn "herdr tab create failed — rolling back"
+      git_in "$canonical" worktree remove "$target" --force >/dev/null 2>&1 || true
+      git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || true
+      die 50 "rolled back due to herdr failure"
+    fi
   fi
   green "fetched PR #$num "
   printf 'worktree=%s branch=%s\n' "$target" "$branch"
@@ -847,6 +882,7 @@ cmd_cd() {
 cmd_focus() {
   guard_not_canonical
   local id="${1:-}"
+  herdr_available || die 30 "wt focus requires herdr (tab management)"
   [[ -n "$id" ]] || die 10 "usage: wt focus <id>"
   local repo
   repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
@@ -864,6 +900,7 @@ cmd_focus() {
 
 cmd_close_tab() {
   guard_forbidden
+  herdr_available || die 30 "wt close-tab requires herdr (tab management)"
   local force=0 id=""
   while (($#)); do
     case "$1" in
@@ -906,6 +943,7 @@ cmd_resume() {
   ws_name=$(cfg_repo_get "$repo" herdr_workspace)
   path="$wt_root/$id"
   [[ -d "$path" ]] || die 20 "worktree path missing: $path"
+  herdr_available || die 30 "wt resume requires herdr (worktree tab binding)"
   herdr_server_up || die 30 "herdr server not running"
   ws_id=$(herdr_ensure_ws "$ws_name")
   tab_id=$(herdr_pane_for_cwd "$ws_id" "$path" || true)
