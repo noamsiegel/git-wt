@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.1.0"
+WT_VERSION="0.2.1"
 
 red() { printf '\033[31m%b\033[0m' "$*"; }
 yellow() { printf '\033[33m%b\033[0m' "$*"; }

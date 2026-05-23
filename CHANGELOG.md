@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] — version-sync hotfix
+
+Fix `WT_VERSION` constant to match the release tag (was stuck at 0.1.0).
+
 ## [0.1.0] — initial public release
 
 ### Added
