@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.9.5"
+WT_VERSION="0.9.6"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -1006,6 +1006,100 @@ cmd_adopt() {
   wt_plugin_emit_lifecycle "wt:worktree-created" "$repo" "$id" "$target" "$branch"
 }
 
+cmd_move() {
+  guard_forbidden
+  local branch="" repo_override=""
+  while (($#)); do
+    case "$1" in
+      --repo) repo_override="${2:-}"; shift 2 ;;
+      -*) die 10 "unknown flag: $1" ;;
+      *) [[ -z "$branch" ]] && branch="$1" || die 10 "unexpected positional: $1"; shift ;;
+    esac
+  done
+  [[ -n "$branch" ]] || die 10 "usage: wt move [--repo <name>] <branch>"
+
+  # Move only makes sense from inside canonical: cwd has the dirty work to relocate.
+  local repo cwd_info kind
+  if [[ -n "$repo_override" ]]; then
+    local _check=$(cfg_repo_get "$repo_override" path 2>/dev/null)
+    [[ "$_check" == "null" || -z "$_check" ]] && die 10 "unknown repo: $repo_override (configured: $(cfg_repos | tr '\n' ' '))"
+    repo="$repo_override"
+  elif cwd_info=$(repo_for_cwd 2>/dev/null); then
+    repo="${cwd_info%% *}"
+    kind="${cwd_info##* }"
+    [[ "$kind" == "canonical" ]] || die 20 "wt move must be run from a canonical checkout (cwd is a $kind under repo '$repo'). Use 'wt new' instead."
+  else
+    die 20 "wt move must be run from inside a configured canonical checkout (or pass --repo)"
+  fi
+
+  validate_branch_shape "$repo" "$branch"
+
+  local id canonical wt_root base default_branch target
+  id=$(derive_id "$branch")
+  canonical=$(cfg_repo_get "$repo" path)
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+  base=$(cfg_repo_get "$repo" base)
+  default_branch=$(cfg_repo_get "$repo" default_branch)
+  target="$wt_root/$id"
+
+  guard_forbidden "$target"
+  [[ -d "$canonical/.git" || -f "$canonical/.git" ]] || die 20 "canonical $canonical is not a git repo"
+
+  # Refuse if canonical isn't on default branch: 'wt adopt' is the right tool for
+  # moving a non-default branch with its uncommitted work into a worktree.
+  local cur
+  cur=$(git_in "$canonical" rev-parse --abbrev-ref HEAD)
+  [[ "$cur" == "$default_branch" ]] || die 20 "canonical is on '$cur', not '$default_branch'. Use 'wt adopt $cur --commit-wip' or switch first."
+
+  # Refuse if clean: 'wt new' is clearer when there's nothing to relocate.
+  if is_clean "$canonical"; then
+    die 20 "canonical is clean; nothing to move. Use 'wt new $branch' instead."
+  fi
+
+  acquire_lock "$wt_root"
+  [[ -e "$target" ]] && die 20 "target path already exists: $target"
+  wt_dir_registered "$repo" "$target" && die 20 "target path already registered as a worktree"
+  branch_exists_local "$canonical" "$branch" && die 20 "branch already exists locally: $branch"
+  branch_exists_origin "$canonical" "$branch" && die 20 "branch already exists on origin: $branch"
+
+  # Stash staged + unstaged + untracked in canonical, with a recognizable label so
+  # we can find and roll back if anything below fails.
+  local stash_msg="wt-move: relocating work to $branch"
+  info "$(dim "\u2192 stashing uncommitted work in $canonical (\"$stash_msg\")")"
+  if ! git_in "$canonical" stash push --include-untracked --quiet -m "$stash_msg" >/dev/null; then
+    die 1 "git stash failed in canonical"
+  fi
+
+  info "$(dim "\u2192 fetching $base in $canonical (best-effort)")"
+  git_in "$canonical" fetch --quiet origin "${base#origin/}" 2>/dev/null || warn "git fetch failed; proceeding with local refs"
+
+  info "$(dim "\u2192 creating worktree $target from $base on new branch $branch")"
+  if ! git_in "$canonical" worktree add -b "$branch" "$target" "$base" >/dev/null; then
+    # Rollback: restore the stash so the user does not lose work.
+    if git_in "$canonical" stash pop --quiet >/dev/null 2>&1; then
+      die 50 "git worktree add failed; restored stash to canonical"
+    else
+      die 60 "git worktree add failed AND stash pop failed; work is in stash@{0} ($stash_msg). Run 'git -C $canonical stash list'."
+    fi
+  fi
+  git_in "$target" branch --unset-upstream 2>/dev/null || true
+
+  copy_worktreeinclude_files "$canonical" "$target"
+
+  # Pop the stash into the new worktree. On conflict, keep the stash and warn;
+  # do NOT exit non-zero since the worktree and branch are valid \u2014 user can resolve.
+  info "$(dim "\u2192 restoring stashed work in $target")"
+  if ! git_in "$target" stash pop --quiet >/dev/null 2>&1; then
+    warn "git stash pop in worktree had conflicts; stash kept (run 'git -C $target stash list'). Resolve in $target."
+  fi
+
+  green "moved "
+  printf 'work from canonical to worktree=%s branch=%s id=%s\n' "$target" "$branch" "$id"
+
+  # Plugin emit: best-effort dispatch to enabled plugins.
+  wt_plugin_emit_lifecycle "wt:worktree-created" "$repo" "$id" "$target" "$branch"
+}
+
 cmd_pr() {
   guard_forbidden
   local num="${1:-}"
@@ -1648,6 +1742,7 @@ wt $WT_VERSION — worktree CLI
 
   wt new <branch>              create new worktree branched from <base>
   wt adopt <branch> [--id <id>]  move an existing branch into a worktree
+  wt move <branch>             relocate uncommitted canonical work to a new worktree
   wt pr <number>               create worktree for inbound PR (fetches pull/<n>/head)
   wt list                      list worktrees per configured repo
   wt status [--refresh]        list + reap-eligibility (clean/pushed/reachable/tab)
@@ -1787,6 +1882,7 @@ main() {
   case "$sub" in
     new) cmd_new "$@" ;;
     adopt) cmd_adopt "$@" ;;
+    move|mv) cmd_move "$@" ;;
     pr) cmd_pr "$@" ;;
     list|ls) cmd_list "$@" ;;
     status|st) cmd_status "$@" ;;
