@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.9.2"
+WT_VERSION="0.9.3"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -40,6 +40,11 @@ require_deps() {
   "$WT_YQ_BIN" --version 2>&1 | grep -q mikefarah || die 30 "wrong YQ dialect; need mikefarah/yq"
   have git || die 30 "git not found"
   have realpath || die 30 "realpath not found"
+}
+
+# Commands that operate on repos/worktrees need a configured wt setup.
+# Commands like --version, --help, and `plugin validate <path>` don't.
+require_config() {
   [[ -r "$WT_CONFIG" ]] || die 30 "config not readable: $WT_CONFIG"
 }
 
@@ -1764,6 +1769,21 @@ main() {
   require_deps
   local sub="${1:-help}"
   shift || true
+
+  # Skip the require_config check for commands that don't operate on the
+  # configured worktree set. Lets users run `wt --version`, `wt --help`,
+  # `wt onboard`, and `wt plugin validate <path>` before any wt config
+  # exists at $WT_CONFIG.
+  case "$sub" in
+    -h|--help|help|--version|-V|version|onboard|upgrade) ;;
+    plugin)
+      # plugin validate <path> doesn't need wt config (it operates on the
+      # given plugin path only). Other plugin subcommands write to the
+      # plugin dir but also don't need wt config.
+      ;;
+    *) require_config ;;
+  esac
+
   case "$sub" in
     new) cmd_new "$@" ;;
     adopt) cmd_adopt "$@" ;;

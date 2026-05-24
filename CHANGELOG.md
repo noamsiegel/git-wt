@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.3] — config-required split (fix wt --version, plugin validate without config)
+
+### Fixed
+- `wt --version`, `wt --help`, `wt onboard`, `wt upgrade`, and all `wt plugin` subcommands now work without a wt config file at `$WT_CONFIG`. Previously, every command bailed with "config not readable" before dispatching, which broke `brew test git-wt` (runs in a fresh tmp HOME) and any plugin-author CI that wants to run `git-wt plugin validate .` without a configured wt setup.
+- Split `require_deps` (basic tools: bash, yq, git, realpath) from `require_config` (config-readable check). Worktree-operating commands still require config and fail loudly if it's absent.
+
 ## [0.9.2] — conventions documented (RELEASING + TSV + JSON parser)
 
 ### Added
