@@ -8,6 +8,12 @@ on:
         type: choice
         options: [patch, minor, major]
         required: true
+  # Also trigger homebrew bump when a v* tag is pushed directly (manual release
+  # path). The first `release` job is no-op'd in this case via `if`; only the
+  # `homebrew` job runs to bump the tap formula.
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -15,6 +21,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # workflow_dispatch only: tag-push events skip release and run homebrew directly
+    if: github.event_name == 'workflow_dispatch'
     outputs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
     steps:
@@ -73,7 +81,10 @@ jobs:
             --verify-tag
 
   homebrew:
-    needs: release
+    # On workflow_dispatch, wait for the release job to publish the tag.
+    # On push:tags, the tag is already present \u2014 skip the dependency.
+    needs: [release]
+    if: always() && (needs.release.result == 'success' || github.event_name == 'push')
     runs-on: ubuntu-latest
     steps:
       - uses: mislav/bump-homebrew-formula-action@v3
@@ -81,7 +92,7 @@ jobs:
           formula-name: git-wt
           formula-path: Formula/git-wt.rb
           homebrew-tap: noamsiegel/homebrew-tap
-          tag-name: ${{ needs.release.outputs.tag_name }}
-          download-url: https://github.com/noamsiegel/git-wt/archive/refs/tags/${{ needs.release.outputs.tag_name }}.tar.gz
+          tag-name: ${{ needs.release.outputs.tag_name || github.ref_name }}
+          download-url: https://github.com/noamsiegel/git-wt/archive/refs/tags/${{ needs.release.outputs.tag_name || github.ref_name }}.tar.gz
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

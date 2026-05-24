@@ -1,60 +1,92 @@
 # Releasing git-wt
 
-## Pre-release checks
+Two release paths. Both end with the GitHub Actions workflow at `.github/workflows/release.yml` bumping the Homebrew tap formula automatically.
 
-1. Run `bats tests` and confirm all tests pass.
-2. Run `bash -n git-wt`.
-3. Confirm `git status` is clean before the version bump.
-4. Check `WT_VERSION` near the top of `git-wt` matches the intended release.
+## Pre-release checks (every release)
 
-## Cut release
+1. `bats tests` — all tests pass.
+2. `bash -n git-wt` — syntax check.
+3. `git status` — clean working tree.
+4. `CHANGELOG.md` — has an entry for the version being cut.
 
-1. Bump `WT_VERSION="X.Y.Z"` in `git-wt`.
-2. Prepend a `## [vX.Y.Z]` entry to `CHANGELOG.md` with Added / Changed / Fixed sections as applicable.
-3. Commit and tag in this order:
+## Path A — full automation (recommended)
 
-   ```bash
-   git add -A
-   git commit -m "Release vX.Y.Z"
-   git tag -a vX.Y.Z -m "vX.Y.Z"
-   git push origin main
-   git push origin vX.Y.Z
-   ```
+Use when releasing from the standard `main` branch with a CHANGELOG entry already prepended.
 
-4. Create GitHub release only after both pushes succeed:
-
-   ```bash
-   gh release create vX.Y.Z --notes "..."
-   ```
-
-## Homebrew tap update
-
-1. In `~/Documents/GitHub/homebrew-tap`, update `Formula/git-wt.rb` URL and `sha256` for `vX.Y.Z`.
-2. Verify formula installs these pkgshare assets:
-   - `plugins-registry.json`
-   - `docs/`
-3. Verify formula uses `inreplace` so `WT_PLUGIN_REGISTRY` points at the installed `pkgshare/plugins-registry.json`.
-4. This check is mandatory: v0.9.0 was re-cut because pkgshare registry/docs install was missed.
-5. Upgrade and smoke test:
+1. Prepend the `## [vX.Y.Z]` entry to `CHANGELOG.md`. Commit.
+2. From the GitHub Actions UI, run `release` workflow with the desired version-bump kind (`patch` / `minor` / `major`).
+3. The workflow does the rest:
+   - Computes `vX.Y.Z` from the latest tag + bump kind
+   - Verifies the CHANGELOG entry exists
+   - Patches `WT_VERSION="X.Y.Z"` in `git-wt`, commits, pushes
+   - Creates annotated tag `vX.Y.Z`, pushes tag
+   - Creates GitHub release with tag notes
+   - Triggers `homebrew` job: opens a PR in `noamsiegel/homebrew-tap` updating `Formula/git-wt.rb` URL + sha256
+4. Review and merge the homebrew-tap PR.
+5. Smoke test:
 
    ```bash
    brew update
    brew upgrade noamsiegel/tap/git-wt
    wt --version
-   wt plugin install nonexistent
+   wt plugin install nonexistent   # must list herdr, zed, cmux
    ```
 
-6. `wt plugin install nonexistent` must show registry entries including `herdr`, `zed`, and `cmux`.
+## Path B — manual tag (fallback)
+
+Use when you need to release a non-main commit, or when the workflow_dispatch route is unavailable.
+
+1. Bump `WT_VERSION="X.Y.Z"` in `git-wt`. Prepend CHANGELOG entry. Commit:
+
+   ```bash
+   git add -A
+   git commit -m "Release vX.Y.Z"
+   ```
+
+2. Tag and push:
+
+   ```bash
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   git push origin main
+   git push origin vX.Y.Z
+   ```
+
+3. Create the GitHub release (the workflow's `release` job only runs on `workflow_dispatch`, so you do it manually here):
+
+   ```bash
+   gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."
+   ```
+
+4. The `homebrew` job in `release.yml` fires automatically on the tag push and opens the formula-bump PR. No manual sha256 computation or formula edit needed.
+5. Review/merge the homebrew-tap PR.
+6. Smoke test (same as Path A).
+
+## Homebrew formula invariants
+
+The `homebrew` job updates URL + sha256 only. The rest of `Formula/git-wt.rb` is invariant and must keep these properties:
+
+- pkgshare installs:
+  - `plugins-registry.json`
+  - `docs/`
+- `inreplace` rewrites `WT_PLUGIN_REGISTRY` to point at `pkgshare/plugins-registry.json`.
+- v0.9.0 was re-cut because pkgshare assets weren't installed; this check is mandatory if you ever rewrite the formula.
 
 ## Adding a new registry plugin
 
-1. Update root `plugins-registry.json`; this is the file copied into formula `pkgshare`.
-2. Bump `WT_VERSION`.
-3. Release as above. Homebrew users receive the new `pkgshare/plugins-registry.json` on upgrade.
+1. Update root `plugins-registry.json` (it's copied into `pkgshare`).
+2. Bump `WT_VERSION` and release via Path A or B.
+3. Homebrew users receive the new `pkgshare/plugins-registry.json` on the next `brew upgrade`.
 
 ## Recovery
 
-- Push failed before tag push: fix the push failure, then push `main`, then push `vX.Y.Z`; create GitHub release only after both succeed.
-- Tag misaligned after failed push or premature release: delete the bad remote tag/release, recreate annotated tag on the intended commit, push tag again, then recreate release notes.
-- Stale shim breaks push: inspect `.git/hooks/pre-push`, remove obsolete `guardrails` shim, reinstall current hook chain, rerun release push.
-- Plugin registry missing after install: formula failed to install pkgshare assets or `inreplace` missed `WT_PLUGIN_REGISTRY`. Fix formula, re-cut release, then rerun brew upgrade and smoke tests.
+| Failure | Fix |
+|---|---|
+| Workflow fails after pushing main but before tagging | Re-run workflow with same inputs; `Sync WT_VERSION` step is idempotent (`git diff --quiet` skips when already bumped). |
+| Tag pushed but homebrew job failed (e.g. token expired) | Re-run the `homebrew` job alone from the Actions UI, or push the tag again (delete + re-push) to retrigger. |
+| Tag misaligned (wrong commit) | Delete remote tag (`git push --delete origin vX.Y.Z`), delete release, retag on correct commit, push again. |
+| Formula PR opened but doesn't merge | Manually edit URL/sha256 in `homebrew-tap`'s `Formula/git-wt.rb`, commit, merge. |
+| Stale `pre-push` shim breaks push | Inspect `.git/hooks/pre-push`, remove obsolete `guardrails` shim, reinstall current hook chain. |
+
+## Required secret
+
+`HOMEBREW_TAP_TOKEN` must be set in this repo's secrets, with `contents: write` on `noamsiegel/homebrew-tap`. Without it, the `homebrew` job fails and the formula bump must be done manually.
