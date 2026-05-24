@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] — config snapshot
+
+### Added
+- Added `cfg_repo_record`, `cfg_each_repo_record`, and `cfg_reload` as the shared config snapshot interface for canonical repo fields after defaults and `{repo}` expansion.
+
+### Changed
+- `wt doctor --install-hooks`, doctor repo checks, and onboard cache refresh now consume repo config through snapshot records instead of repeated field lookups.
+
 ## [0.7.0] — branch policy module
 
 ### Added

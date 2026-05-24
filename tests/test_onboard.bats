@@ -36,6 +36,10 @@ _mk_new_repo() {
   grep -q '^  myproj:' "$WT_CONFIG"
   # Cache rebuilt with myproj entry
   grep -q "$repo" "$WT_CACHE"
+  # Same process should reload config before cache/list consumers run.
+  run wt list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[myproj]"* ]]
 }
 
 @test "onboard: refuses non-git directory" {

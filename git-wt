@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.7.0"
+WT_VERSION="0.8.0"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -15,6 +15,7 @@ WT_VERSION="0.7.0"
 WT_PLUGIN_API_VERSION="git-wt.plugin.v0"
 WT_PLUGIN_DIR=${WT_PLUGIN_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/git-wt/plugins}
 WT_PLUGIN_CONFIG=${WT_PLUGIN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/git-wt/plugins.json}
+WT_YQ_BIN=${WT_YQ_BIN:-yq}
 
 red() { printf '\033[31m%b\033[0m' "$*"; }
 yellow() { printf '\033[33m%b\033[0m' "$*"; }
@@ -32,8 +33,8 @@ require_deps() {
   if (( BASH_VERSINFO[0] < 4 )); then
     die 30 "wt requires bash >= 4 (got $BASH_VERSION). Install via 'brew install bash'."
   fi
-  have yq || die 30 "yq not found. Install via 'brew install yq' (mikefarah/yq)."
-  yq --version 2>&1 | grep -q mikefarah || die 30 "wrong yq dialect; need mikefarah/yq"
+  have "$WT_YQ_BIN" || die 30 "YQ not found. Install via 'brew install yq' (mikefarah/yq)."
+  "$WT_YQ_BIN" --version 2>&1 | grep -q mikefarah || die 30 "wrong YQ dialect; need mikefarah/yq"
   have git || die 30 "git not found"
   have realpath || die 30 "realpath not found"
   [[ -r "$WT_CONFIG" ]] || die 30 "config not readable: $WT_CONFIG"
@@ -42,7 +43,7 @@ require_deps() {
 # ---------- config helpers ----------
 # ---------- config (cached) ----------
 # Single yq dump of the entire config at first read; subsequent reads hit bash arrays.
-# Invalidate by setting _CFG_LOADED=0 (only needed after wt itself writes to the config).
+# Call cfg_reload after wt itself writes to the config.
 _CFG_LOADED=0
 declare -gA _CFG_REPO_FIELDS=()
 declare -gA _CFG_PATTERNS=()
@@ -50,6 +51,7 @@ _CFG_REPOS_LIST=""
 _CFG_FORBIDDEN_LIST=""
 _CFG_MAX_LEN=80
 _CFG_HOOK_ENFORCE_BRANCH_NAMES=false
+_CFG_REPO_RECORD_FIELDS=(repo path worktree_root base default_branch herdr_workspace)
 
 _cfg_load() {
   (( _CFG_LOADED == 1 )) && return 0
@@ -92,17 +94,51 @@ _cfg_load() {
   _CFG_LOADED=1
 }
 cfg_repos() { _cfg_load; printf '%s' "$_CFG_REPOS_LIST"; }
-cfg_repo_get() {
-  _cfg_load
-  local repo="$1" field="$2" v="${_CFG_REPO_FIELDS[$1.$2]:-}"
+_cfg_repo_field_value() {
+  local repo="$1" field="$2" v="${_CFG_REPO_FIELDS[$repo.$field]:-}"
   if [[ -z "$v" ]]; then
     v="${_CFG_REPO_FIELDS[__defaults__.$field]:-}"
   fi
   if [[ -n "$v" ]]; then
     v="${v//\{repo\}/$repo}"
   fi
+  printf '%s' "$v"
+}
+cfg_repo_configured() {
+  _cfg_load
+  [[ "$1" == "__defaults__" ]] && return 0
+  [[ $'\n'"$_CFG_REPOS_LIST" == *$'\n'"$1"$'\n'* ]]
+}
+cfg_repo_record() {
+  _cfg_load
+  local repo="$1" field value sep=""
+  cfg_repo_configured "$repo" || return 1
+  for field in "${_CFG_REPO_RECORD_FIELDS[@]}"; do
+    if [[ "$field" == "repo" ]]; then
+      value="$repo"
+    else
+      value=$(_cfg_repo_field_value "$repo" "$field")
+    fi
+    printf '%s%s' "$sep" "$value"
+    sep=$'\034'
+  done
+  printf '\n'
+}
+cfg_each_repo_record() {
+  _cfg_load
+  local repo
+  while IFS= read -r repo; do
+    [[ -z "$repo" ]] && continue
+    cfg_repo_record "$repo"
+  done <<< "$_CFG_REPOS_LIST"
+}
+cfg_repo_get() {
+  _cfg_load
+  local repo="$1" field="$2" v
+  v=$(_cfg_repo_field_value "$repo" "$field")
   [[ -z "$v" ]] && echo "null" || echo "$v"
 }
+cfg_reload() { _CFG_LOADED=0; }
 cfg_branch_patterns() {
   _cfg_load
   local patterns="${_CFG_PATTERNS[$1]:-}"
@@ -224,7 +260,8 @@ wt_each_worktree() {
 
 wt_record_fields() {
   local _record="${1//$'\t'/$'\034'}"
-  IFS=$'\034' read -r "$2" "$3" "$4" "$5" "$6" "$7" "$8" <<< "$_record"
+  shift
+  IFS=$'\034' read -r "$@" <<< "$_record"
 }
 
 # Resolve <id> to one TSV worktree record, optionally constrained with --repo <repo>.
@@ -366,9 +403,9 @@ wt_plugin_manifest_read() {
 wt_plugin_is_enabled() {
   local name="$1"
   [[ -r "$WT_PLUGIN_CONFIG" ]] || return 1
-  have yq || return 1
+  have "$WT_YQ_BIN" || return 1
   local enabled
-  enabled=$(yq -p json -o tsv ".enabled[]" "$WT_PLUGIN_CONFIG" 2>/dev/null || true)
+  enabled=$("$WT_YQ_BIN" -p json -o tsv ".enabled[]" "$WT_PLUGIN_CONFIG" 2>/dev/null || true)
   [[ "$enabled" == *"$name"* ]] || return 1
   printf '%s\n' "$enabled" | grep -Fxq "$name"
 }
@@ -391,7 +428,7 @@ wt_plugin_list_installed() {
 wt_plugin_emit() {
   local event="$1" payload="$2"
   [[ -d "$WT_PLUGIN_DIR" ]] || return 0
-  have yq || return 0
+  have "$WT_YQ_BIN" || return 0
   local name exe manifest
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
@@ -401,7 +438,7 @@ wt_plugin_emit() {
     manifest=$(wt_plugin_manifest_read "$name" 2>/dev/null || true)
     # Quietly skip plugins that don't declare this event.
     if [[ -n "$manifest" ]]; then
-      if ! printf '%s' "$manifest" | yq -p json -o tsv ".events[]" 2>/dev/null | grep -Fxq "$event"; then
+      if ! printf '%s' "$manifest" | "$WT_YQ_BIN" -p json -o tsv ".events[]" 2>/dev/null | grep -Fxq "$event"; then
         continue
       fi
     fi
@@ -416,17 +453,17 @@ _wt_plugin_lifecycle_payload() {
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [[ -n "$reason" ]]; then
     API_VERSION="$WT_PLUGIN_API_VERSION" EVENT="$event" REPO="$repo" ID="$id" PATH_VALUE="$path" BRANCH="$branch" REASON="$reason" TIMESTAMP="$timestamp" \
-      yq -n -o=json '{"api_version": strenv(API_VERSION), "event": strenv(EVENT), "repo": strenv(REPO), "worktree": {"id": strenv(ID), "path": strenv(PATH_VALUE), "branch": strenv(BRANCH)}, "reason": strenv(REASON), "timestamp": strenv(TIMESTAMP)}'
+      "$WT_YQ_BIN" -n -o=json '{"api_version": strenv(API_VERSION), "event": strenv(EVENT), "repo": strenv(REPO), "worktree": {"id": strenv(ID), "path": strenv(PATH_VALUE), "branch": strenv(BRANCH)}, "reason": strenv(REASON), "timestamp": strenv(TIMESTAMP)}'
   else
     API_VERSION="$WT_PLUGIN_API_VERSION" EVENT="$event" REPO="$repo" ID="$id" PATH_VALUE="$path" BRANCH="$branch" TIMESTAMP="$timestamp" \
-      yq -n -o=json '{"api_version": strenv(API_VERSION), "event": strenv(EVENT), "repo": strenv(REPO), "worktree": {"id": strenv(ID), "path": strenv(PATH_VALUE), "branch": strenv(BRANCH)}, "timestamp": strenv(TIMESTAMP)}'
+      "$WT_YQ_BIN" -n -o=json '{"api_version": strenv(API_VERSION), "event": strenv(EVENT), "repo": strenv(REPO), "worktree": {"id": strenv(ID), "path": strenv(PATH_VALUE), "branch": strenv(BRANCH)}, "timestamp": strenv(TIMESTAMP)}'
   fi
 }
 
 wt_plugin_event_has_handler() {
   local event="$1" name exe manifest
   [[ -d "$WT_PLUGIN_DIR" ]] || return 1
-  have yq || return 1
+  have "$WT_YQ_BIN" || return 1
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
     wt_plugin_is_enabled "$name" || continue
@@ -434,7 +471,7 @@ wt_plugin_event_has_handler() {
     [[ -n "$exe" ]] || continue
     manifest=$(wt_plugin_manifest_read "$name" 2>/dev/null || true)
     [[ -z "$manifest" ]] && return 0
-    if printf '%s' "$manifest" | yq -p json -o tsv ".events[]" 2>/dev/null | grep -Fxq "$event"; then
+    if printf '%s' "$manifest" | "$WT_YQ_BIN" -p json -o tsv ".events[]" 2>/dev/null | grep -Fxq "$event"; then
       return 0
     fi
   done < <(wt_plugin_list_installed)
@@ -475,9 +512,9 @@ EOF
 wt_plugin_config_enable() {
   local name="$1"
   wt_plugin_config_init
-  have yq || die 30 "yq required to manage plugin config"
-  if ! yq -p json -o tsv '.enabled[]' "$WT_PLUGIN_CONFIG" 2>/dev/null | grep -Fxq "$name"; then
-    yq -p json -o json -i ".enabled += [\"$name\"]" "$WT_PLUGIN_CONFIG"
+  have "$WT_YQ_BIN" || die 30 "YQ required to manage plugin config"
+  if ! "$WT_YQ_BIN" -p json -o tsv '.enabled[]' "$WT_PLUGIN_CONFIG" 2>/dev/null | grep -Fxq "$name"; then
+    "$WT_YQ_BIN" -p json -o json -i ".enabled += [\"$name\"]" "$WT_PLUGIN_CONFIG"
   fi
 }
 
@@ -485,8 +522,8 @@ wt_plugin_config_enable() {
 wt_plugin_config_disable() {
   local name="$1"
   wt_plugin_config_init
-  have yq || die 30 "yq required to manage plugin config"
-  yq -p json -o json -i "del(.enabled[] | select(. == \"$name\"))" "$WT_PLUGIN_CONFIG"
+  have "$WT_YQ_BIN" || die 30 "YQ required to manage plugin config"
+  "$WT_YQ_BIN" -p json -o json -i "del(.enabled[] | select(. == \"$name\"))" "$WT_PLUGIN_CONFIG"
 }
 
 # ---------- git helpers ----------
@@ -601,14 +638,13 @@ cmd_doctor() {
   done
 
   printf '%-40s' "bash >= 4"; if (( BASH_VERSINFO[0] >= 4 )); then green "PASS\n"; else red "FAIL\n"; fail=1; fi
-  printf '%-40s' "yq (mikefarah/yq)"; if yq --version 2>&1 | grep -q mikefarah; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+  printf '%-40s' "yq (mikefarah/yq)"; if "$WT_YQ_BIN" --version 2>&1 | grep -q mikefarah; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
   printf '%-40s' "git available"; if have git; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
   printf '%-40s' "config readable"; if [[ -r "$WT_CONFIG" ]]; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
 
-  local repo path default
-  for repo in $(cfg_repos); do
-    path=$(cfg_repo_get "$repo" path)
-    default=$(cfg_repo_get "$repo" default_branch)
+  local record repo path _worktree_root _base default _workspace
+  while IFS= read -r record; do
+    wt_record_fields "$record" repo path _worktree_root _base default _workspace
     printf '%-40s' "[$repo] canonical exists"
     if [[ -d "$path/.git" || -f "$path/.git" ]]; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
     printf '%-40s' "[$repo] canonical on $default"
@@ -617,16 +653,16 @@ cmd_doctor() {
     if [[ "$cur" == "$default" ]]; then green "PASS\n"; else yellow "WARN ($cur)\n"; fi
     printf '%-40s' "[$repo] canonical clean"
     if is_clean "$path"; then green "PASS\n"; else yellow "WARN (dirty)\n"; fi
-  done
+  done < <(cfg_each_repo_record)
 
   printf '%-40s' "no worktrees under forbidden_roots"
-  local bad=0 wt_root
+  local bad=0 record _repo _path wt_root _base _default _workspace
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
-    for repo in $(cfg_repos); do
-      wt_root=$(cfg_repo_get "$repo" worktree_root)
+    while IFS= read -r record; do
+      wt_record_fields "$record" _repo _path wt_root _base _default _workspace
       if [[ "$(rp "$wt_root")" == "$f"/* ]]; then bad=1; break 2; fi
-    done
+    done < <(cfg_each_repo_record)
   done < <(cfg_forbidden)
   if (( bad == 0 )); then green "PASS\n"; else red "FAIL\n"; fail=1; fi
 
@@ -644,23 +680,23 @@ cmd_doctor() {
 }
 
 generate_path_cache() {
-  local repo path wt_root tmp rp_path rp_wt_root rp_forbidden
+  local record repo path wt_root tmp rp_path rp_wt_root rp_forbidden _base _default _workspace
   tmp=$(mktemp)
   {
     echo "# autogenerated by wt doctor --install-hooks (do not edit)"
     printf 'WT_CANONICAL_PATHS=('
-    for repo in $(cfg_repos); do
-      path=$(cfg_repo_get "$repo" path)
+    while IFS= read -r record; do
+      wt_record_fields "$record" repo path wt_root _base _default _workspace
       rp_path=$(rp "$path")
       printf "%q %q " "$path" "$rp_path"
-    done
+    done < <(cfg_each_repo_record)
     printf ')\n'
     printf 'WT_WORKTREE_ROOTS=('
-    for repo in $(cfg_repos); do
-      wt_root=$(cfg_repo_get "$repo" worktree_root)
+    while IFS= read -r record; do
+      wt_record_fields "$record" repo path wt_root _base _default _workspace
       rp_wt_root=$(rp "$wt_root")
       printf "%q %q " "$wt_root" "$rp_wt_root"
-    done
+    done < <(cfg_each_repo_record)
     printf ')\n'
     printf 'WT_FORBIDDEN_ROOTS=('
     while IFS= read -r f; do
@@ -671,18 +707,19 @@ generate_path_cache() {
     printf ')\n'
     printf 'WT_HOOK_ENFORCE_BRANCH_NAMES=%q\n' "$(cfg_hook_enforce_branch_names)"
     echo 'declare -A WT_REPO_BY_PATH=('
-    for repo in $(cfg_repos); do
-      path=$(cfg_repo_get "$repo" path)
+    while IFS= read -r record; do
+      wt_record_fields "$record" repo path wt_root _base _default _workspace
       rp_path=$(rp "$path")
       printf "  [%q]=%q\n" "$path" "$repo"
       [[ "$path" != "$rp_path" ]] && printf "  [%q]=%q\n" "$rp_path" "$repo"
-    done
+    done < <(cfg_each_repo_record)
     echo ')'
-    for repo in $(cfg_repos); do
+    while IFS= read -r record; do
+      wt_record_fields "$record" repo path wt_root _base _default _workspace
       printf 'WT_PATTERNS_%s=(\n' "${repo//[^a-zA-Z0-9_]/_}"
       branch_policy_emit_cache "$repo"
       printf ')\n'
-    done
+    done < <(cfg_each_repo_record)
   } > "$tmp"
   mv "$tmp" "$WT_CACHE"
 }
@@ -1246,7 +1283,7 @@ EOF
       REPO="$safe_name" VALUE="origin/$default_branch" yq -i '.repos[strenv(REPO)].base = strenv(VALUE)' "$WT_CONFIG"
     fi
   fi
-  _CFG_LOADED=0   # invalidate cache after config write
+  cfg_reload
   # Regenerate path cache so hooks/prompt pick up the new repo.
   generate_path_cache
   green "added "
