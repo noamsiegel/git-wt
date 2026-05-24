@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] — full-hybrid plugin ecosystem
+
+### Added
+- Added `plugins-registry.json` as the curated bare-name plugin registry, seeded with first-party `herdr`.
+- Added `wt plugin validate <path>` for plugin authors to validate manifests, executables, API compatibility, capabilities shape, and health JSON before publishing.
+- Added `docs/plugin-contract.md` as the canonical `git-wt.plugin.v0` contract, including manifest schema, event payloads, capabilities, health protocol, trust model, and v1 criteria.
+
+### Changed
+- Bare plugin names now resolve only through the curated registry; unknown bare names fail with known plugins and explicit third-party install instructions.
+- Plugin manifests now prefer `api_versions: ["git-wt.plugin.v0"]`; singular `api_version` remains compatible with a deprecation warning.
+- Install and enable now reject plugins whose API versions do not intersect host-supported APIs.
+- Manifest `events` are lifecycle subscriptions; `capabilities` are separate action declarations and default to `[]` when absent.
+- README now points plugin authors at the contract doc, documents registry-vs-explicit installs and `wt plugin validate`, and positions git-wt against adjacent worktree/stack tools.
+
 ## [0.8.0] — config snapshot
 
 ### Added

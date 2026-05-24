@@ -1,0 +1,26 @@
+{
+  "api_version": "git-wt.plugin.v0",
+  "plugins": [
+    {
+      "name": "herdr",
+      "repo": "noamsiegel/wt-herdr",
+      "description": "herdr terminal-multiplexer tab integration",
+      "tier": "first-party",
+      "api_versions": ["git-wt.plugin.v0"]
+    },
+    {
+      "name": "zed",
+      "repo": "noamsiegel/wt-zed",
+      "description": "Zed editor integration (opens worktree in new window on create)",
+      "tier": "first-party",
+      "api_versions": ["git-wt.plugin.v0"]
+    },
+    {
+      "name": "cmux",
+      "repo": "noamsiegel/wt-cmux",
+      "description": "cmux terminal multiplexer integration (worktree ↔ cmux workspace lifecycle)",
+      "tier": "first-party",
+      "api_versions": ["git-wt.plugin.v0"]
+    }
+  ]
+}

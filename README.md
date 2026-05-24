@@ -4,7 +4,11 @@
 
 `wt` is a tiny, opinionated tool that lets you run multiple AI coding sessions
 (Claude Code, Cursor, OMP, plain shells) against the same repository **at the
-same time** without conflicts. It does this by enforcing one simple rule:
+same time** without conflicts. The repo and binary remain `git-wt`/`wt`; nearby
+ecosystems are crowded (`wt` for Worktrunk, Windows Terminal, PyPI/npm name
+pressure), so this project deliberately stays narrow: policy, safety, and a
+plugin boundary for tab/UI integrations. It does this by enforcing one simple
+rule:
 
 > The canonical checkout is a parking spot.
 > All real work happens in worktrees.
@@ -42,6 +46,17 @@ by autopushing every commit to a private remote branch immediately.
 
 `wt new <id>` creates a worktree and branches from `origin/main`. `wt reap <id>`
 cleans it up when you're done. Install `wt-herdr` if you want tab creation/focus.
+
+
+## Competitive position
+
+| Tool | What they do | What we do that they do not |
+|---|---|---|
+| Worktrunk | Broad Rust worktree UX: picker, status columns, merge flow, PR checkout, hooks, dev-server and cache helpers. | Smaller policy/safety layer: canonical checkout parking, commit-time autopush, branch-pattern hook gates, forbidden roots, language-agnostic tab plugin contract. Worktrunk is stronger general worktree UX. |
+| wtp (Worktree Plus) | Go worktree manager with path generation, `.wtp.yml`, copy/symlink/command post-create hooks, shell completion. | Enforces agent-safety invariants instead of only environment setup: no canonical commits, immediate remote persistence, per-repo XDG policy, plugin lifecycle. |
+| gwq | Global worktree dashboard/navigation with fuzzy finder, tmux integration, JSON output, status watch. | Safety-policy-first hooks, autopush, canonical parking, branch validation, and tmux/tab integration behind plugin protocol rather than built in. |
+| git-spice | Stacked branch/PR workflow for GitHub/GitLab/Bitbucket; worktree-aware but not worktree-first. | Owns worktree session lifecycle and safety; no PR/stack management. Can coexist as lower-level workspace layer. |
+| Git Town | Mature high-level Git workflow: branch lineage, sync/ship/propose, broad forge support, undo/runlog. | Worktree-specific parking/autopush/forbidden-root model plus tab plugin API. Git Town owns branch workflow; git-wt owns worktree session safety. |
 
 ## Installation
 
@@ -130,34 +145,41 @@ Example `.worktreeinclude`:
 
 Patterns support `*`, `?`, `**`. Comments start with `#`.
 
-## Plugins (v0.3.0+)
+## Plugins (v0.9.0+)
 
-git-wt fires lifecycle events that plugins can subscribe to:
-`wt:worktree-created`, `wt:worktree-removed`, and `wt:focus`.
 Plugins are stand-alone executables named `wt-<name>` installed under
-`~/.local/share/git-wt/plugins/`. The contract is JSON-on-stdin so plugins
-can be written in any language.
+`~/.local/share/git-wt/plugins/`. They receive JSON lifecycle events on stdin.
+The canonical contract is [`docs/plugin-contract.md`](./docs/plugin-contract.md).
 
 ```bash
-# Install + enable a plugin
-wt plugin install tmux          # → noamsiegel/wt-tmux (if it exists)
+# Curated bare-name install: resolves only through plugins-registry.json
+wt plugin install herdr
+
+# Explicit third-party installs: user-trust source
 wt plugin install owner/wt-kitty
+wt plugin install https://github.com/owner/wt-kitty.git
+
+# Validate plugin checkout before publishing or linking
+wt plugin validate /path/to/wt-mything
 
 # Manage
 wt plugin list
-wt plugin disable tmux
-wt plugin remove tmux
+wt plugin enable herdr
+wt plugin disable herdr
+wt plugin remove herdr
 
-# Develop a plugin locally
-wt plugin link /path/to/wt-mything   # symlinks instead of cloning
-wt plugin emit mything wt:focus --id repo--feature-x   # manually fire one event
+# Develop locally
+wt plugin link /path/to/wt-mything
+wt plugin emit mything wt:focus --id repo--feature-x
 ```
+
+Bare names no longer fall back to `noamsiegel/wt-<name>`. Unknown bare names
+fail with known registry entries and instructions for explicit third-party
+installs.
 
 Install the reference tab plugin with `wt plugin install herdr`. Without a tab
 plugin, worktree commands still work; tab-only commands (`focus`, `close-tab`,
 `resume`) exit with an install hint.
-
-The contract is documented in CHANGELOG.md and is **explicitly draft (`git-wt.plugin.v0`)**.
 
 ## Bypass / escape hatches
 

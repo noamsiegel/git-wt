@@ -7,12 +7,15 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.8.0"
+WT_VERSION="0.9.0"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
 # `wt plugin --help` for management and the README for the contract.
 WT_PLUGIN_API_VERSION="git-wt.plugin.v0"
+WT_PLUGIN_API_SUPPORTED=("git-wt.plugin.v0")
+_WT_PLUGIN_LEGACY_API_WARNED=0
+WT_PLUGIN_REGISTRY=${WT_PLUGIN_REGISTRY:-$(dirname "$(realpath "$0" 2>/dev/null || echo "$0")")/plugins-registry.json}
 WT_PLUGIN_DIR=${WT_PLUGIN_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/git-wt/plugins}
 WT_PLUGIN_CONFIG=${WT_PLUGIN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/git-wt/plugins.json}
 WT_YQ_BIN=${WT_YQ_BIN:-yq}
@@ -397,6 +400,137 @@ wt_plugin_manifest_read() {
   local mf="$WT_PLUGIN_DIR/wt-$name/wt-plugin.json"
   [[ -r "$mf" ]] || return 1
   cat "$mf"
+}
+
+wt_plugin_manifest_api_versions() {
+  local manifest="$1"
+  local versions legacy
+  versions=$(printf '%s' "$manifest" | "$WT_YQ_BIN" -p json -o tsv '.api_versions[]' 2>/dev/null || true)
+  if [[ -n "$versions" ]]; then
+    printf '%s\n' "$versions"
+    return 0
+  fi
+  legacy=$(printf '%s' "$manifest" | "$WT_YQ_BIN" -p json -o tsv '.api_version // ""' 2>/dev/null || true)
+  if [[ -n "$legacy" && "$legacy" != "null" ]]; then
+    if (( _WT_PLUGIN_LEGACY_API_WARNED == 0 )); then
+      warn "plugin manifest uses deprecated api_version; use api_versions array"
+      _WT_PLUGIN_LEGACY_API_WARNED=1
+    fi
+    printf '%s\n' "$legacy"
+    return 0
+  fi
+  return 1
+}
+
+wt_plugin_manifest_compatible() {
+  local manifest="$1" version supported
+  while IFS= read -r version; do
+    [[ -n "$version" ]] || continue
+    for supported in "${WT_PLUGIN_API_SUPPORTED[@]}"; do
+      [[ "$version" == "$supported" ]] && return 0
+    done
+  done < <(wt_plugin_manifest_api_versions "$manifest")
+  return 1
+}
+
+wt_plugin_manifest_supported_text() {
+  local IFS=', '
+  printf '%s' "${WT_PLUGIN_API_SUPPORTED[*]}"
+}
+
+wt_plugin_validate_dir() {
+  local dir="$1" run_health="${2:-1}"
+  local errors=0 manifest manifest_json name executable events_count capabilities_count exe health_output health_ok api_versions versions_csv
+  [[ -d "$dir" ]] || { printf 'ERROR: not a directory: %s\n' "$dir"; return 1; }
+  manifest="$dir/wt-plugin.json"
+  if [[ ! -r "$manifest" ]]; then
+    printf 'ERROR: missing manifest: %s\n' "$manifest"
+    return 1
+  fi
+  if ! "$WT_YQ_BIN" -p json '.' "$manifest" >/dev/null 2>&1; then
+    printf 'ERROR: wt-plugin.json is not valid JSON\n'
+    return 1
+  fi
+
+  manifest_json=$(cat "$manifest")
+  name=$(printf '%s' "$manifest_json" | "$WT_YQ_BIN" -p json -o tsv '.name // ""' 2>/dev/null || true)
+  executable=$(printf '%s' "$manifest_json" | "$WT_YQ_BIN" -p json -o tsv '.executable // ""' 2>/dev/null || true)
+  events_count=$(printf '%s' "$manifest_json" | "$WT_YQ_BIN" -p json -o tsv '.events | length' 2>/dev/null || echo 0)
+  capabilities_count=$(printf '%s' "$manifest_json" | "$WT_YQ_BIN" -p json -o tsv '(.capabilities // []) | length' 2>/dev/null || echo 0)
+  api_versions=$(wt_plugin_manifest_api_versions "$manifest_json" 2>/dev/null || true)
+
+  if [[ -z "$name" || "$name" == "null" ]]; then printf 'ERROR: manifest field .name is required\n'; errors=$((errors + 1)); fi
+  if [[ -z "$executable" || "$executable" == "null" ]]; then printf 'ERROR: manifest field .executable is required\n'; errors=$((errors + 1)); fi
+  if [[ -z "$api_versions" ]]; then
+    printf 'ERROR: manifest field .api_versions must include a supported API version (%s)\n' "$(wt_plugin_manifest_supported_text)"; errors=$((errors + 1))
+  elif ! wt_plugin_manifest_compatible "$manifest_json" >/dev/null; then
+    versions_csv=${api_versions//$'\n'/,}
+    printf 'ERROR: incompatible plugin API versions: %s (host supports: %s)\n' "$versions_csv" "$(wt_plugin_manifest_supported_text)"; errors=$((errors + 1))
+  fi
+  if ! printf '%s' "$manifest_json" | "$WT_YQ_BIN" -p json -e '.events | type == "!!seq"' >/dev/null 2>&1; then
+    printf 'ERROR: manifest field .events must be an array\n'; errors=$((errors + 1))
+  elif [[ -z "$events_count" || "$events_count" == "0" || "$events_count" == "null" ]]; then
+    printf 'ERROR: manifest field .events must be a non-empty array\n'; errors=$((errors + 1))
+  fi
+  if ! printf '%s' "$manifest_json" | "$WT_YQ_BIN" -p json -e '(.capabilities == null) or (.capabilities | type == "!!seq")' >/dev/null 2>&1; then
+    printf 'ERROR: manifest field .capabilities must be an array when present\n'; errors=$((errors + 1))
+  fi
+  if [[ -n "$name" && "$name" != "null" && -n "$executable" && "$executable" != "wt-$name" ]]; then
+    printf 'ERROR: executable must be wt-%s (got %s)\n' "$name" "$executable"; errors=$((errors + 1))
+  fi
+  exe="$dir/$executable"
+  if [[ -n "$executable" && "$executable" != "null" && ! -x "$exe" ]]; then
+    printf 'ERROR: executable is missing or not executable: %s\n' "$exe"; errors=$((errors + 1))
+  fi
+
+  if [[ "$run_health" == "1" && -x "$exe" ]]; then
+    if ! health_output=$("$exe" health 2>&1); then
+      printf 'ERROR: health command failed: %s\n' "$health_output"; errors=$((errors + 1)); health_output=""
+    fi
+    if [[ -n "$health_output" ]]; then
+      if ! printf '%s' "$health_output" | "$WT_YQ_BIN" -p json '.' >/dev/null 2>&1; then
+        printf 'ERROR: health output is not JSON: %s\n' "$health_output"; errors=$((errors + 1))
+      else
+        health_ok=$(printf '%s' "$health_output" | "$WT_YQ_BIN" -p json -o tsv '.ok // false' 2>/dev/null || echo false)
+        [[ "$health_ok" == "true" ]] || { printf 'ERROR: health reported ok=false: %s\n' "$health_output"; errors=$((errors + 1)); }
+      fi
+    fi
+  fi
+
+  if (( errors == 0 )); then
+    printf 'OK: plugin %s is valid (capabilities: %s)\n' "$name" "${capabilities_count:-0}"
+    return 0
+  fi
+  return 1
+}
+
+wt_plugin_registry_known_names() {
+  [[ -r "$WT_PLUGIN_REGISTRY" ]] || return 0
+  "$WT_YQ_BIN" -p json -o tsv '.plugins[].name' "$WT_PLUGIN_REGISTRY" 2>/dev/null || true
+}
+
+wt_plugin_registry_repo_for() {
+  local name="$1"
+  [[ -r "$WT_PLUGIN_REGISTRY" ]] || return 1
+  NAME="$name" "$WT_YQ_BIN" -p json -o tsv '.plugins[] | select(.name == strenv(NAME)) | .repo' "$WT_PLUGIN_REGISTRY" 2>/dev/null
+}
+
+wt_plugin_unknown_bare_die() {
+  local name="$1" known plugin
+  known=$(wt_plugin_registry_known_names)
+  {
+    printf 'Unknown plugin: %s\n\n' "$name"
+    printf 'Known plugins:\n'
+    if [[ -n "$known" ]]; then
+      while IFS= read -r plugin; do [[ -n "$plugin" ]] && printf '  %s\n' "$plugin"; done <<< "$known"
+    else
+      printf '  (none; registry missing or empty: %s)\n' "$WT_PLUGIN_REGISTRY"
+    fi
+    printf '\nInstall a third-party plugin explicitly:\n'
+    printf '  wt plugin install <owner>/wt-<name>\n'
+    printf '  wt plugin install <https://...git>\n'
+  } >&2
+  exit 20
 }
 
 # Is the named plugin enabled in WT_PLUGIN_CONFIG?
@@ -1296,6 +1430,9 @@ cmd_plugin() {
     install)
       cmd_plugin_install "$@"
       ;;
+    validate)
+      cmd_plugin_validate "$@"
+      ;;
     link)
       cmd_plugin_link "$@"
       ;;
@@ -1322,7 +1459,9 @@ cmd_plugin() {
 wt plugin — manage git-wt plugins (API: $WT_PLUGIN_API_VERSION)
 
 usage:
-  wt plugin install <repo>           clone wt-<name> plugin from github.com/<repo>
+  wt plugin install <name>           clone a curated plugin from plugins-registry.json
+  wt plugin install <owner/repo|url> clone an explicit plugin from GitHub or URL
+  wt plugin validate <path>          validate a plugin checkout before publishing
   wt plugin link <path>              register a local checkout as a plugin (for dev)
   wt plugin list                     installed plugins + enabled status
   wt plugin enable <name>            add plugin to enabled set
@@ -1334,7 +1473,7 @@ usage:
 Plugin install path: $WT_PLUGIN_DIR
 Active set config:   $WT_PLUGIN_CONFIG
 
-See https://github.com/noamsiegel/git-wt#plugins for the contract.
+See docs/plugin-contract.md for the contract.
 EOF
       ;;
     *)
@@ -1345,17 +1484,21 @@ EOF
 
 cmd_plugin_install() {
   local repo="${1:-}"
-  [[ -n "$repo" ]] || die 10 "usage: wt plugin install <owner/repo|url>"
-  # Normalize: bare 'tmux' → noamsiegel/wt-tmux; owner/repo as-is; URL as-is.
-  local url
+  [[ -n "$repo" ]] || die 10 "usage: wt plugin install <name|owner/repo|url>"
+  local url name registry_repo
   if [[ "$repo" == http*://* ]]; then
     url="$repo"
+    name="${repo##*/}"
+    name="${name%.git}"
   elif [[ "$repo" == */* ]]; then
     url="https://github.com/$repo.git"
+    name="${repo##*/}"
   else
-    url="https://github.com/noamsiegel/wt-$repo.git"
+    registry_repo=$(wt_plugin_registry_repo_for "$repo" || true)
+    [[ -n "$registry_repo" ]] || wt_plugin_unknown_bare_die "$repo"
+    url="https://github.com/$registry_repo.git"
+    name="${registry_repo##*/}"
   fi
-  local name="${repo##*/}"
   name="${name#wt-}"
   local target="$WT_PLUGIN_DIR/wt-$name"
 
@@ -1369,20 +1512,21 @@ cmd_plugin_install() {
     die 30 "git clone failed for $url"
   fi
 
-  # Verify the plugin shape.
-  local exe="$target/wt-$name"
-  local manifest="$target/wt-plugin.json"
-  if [[ ! -x "$exe" ]]; then
+  if ! wt_plugin_validate_dir "$target" 0; then
     rm -rf "$target"
-    die 20 "plugin clone is missing executable 'wt-$name' at the root"
-  fi
-  if [[ ! -r "$manifest" ]]; then
-    warn "plugin has no wt-plugin.json manifest; event routing will fall back to running every event"
+    die 20 "plugin clone failed validation"
   fi
 
   wt_plugin_config_enable "$name"
   green "installed and enabled "
   printf '%s\n' "$name"
+}
+
+cmd_plugin_validate() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || die 10 "usage: wt plugin validate <path-to-plugin-checkout>"
+  path=$(realpath "$path" 2>/dev/null || die 20 "path not found: $path")
+  wt_plugin_validate_dir "$path" 1
 }
 
 cmd_plugin_link() {
@@ -1427,6 +1571,7 @@ cmd_plugin_enable() {
   local name="${1:-}"
   [[ -n "$name" ]] || die 10 "usage: wt plugin enable <name>"
   [[ -d "$WT_PLUGIN_DIR/wt-$name" ]] || die 20 "no plugin 'wt-$name' installed"
+  wt_plugin_validate_dir "$WT_PLUGIN_DIR/wt-$name" 0 >/dev/null || die 20 "plugin 'wt-$name' is incompatible with this wt (host supports: $(wt_plugin_manifest_supported_text))"
   wt_plugin_config_enable "$name"
   green "enabled "; printf '%s\n' "$name"
 }
