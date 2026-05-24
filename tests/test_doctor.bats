@@ -10,8 +10,8 @@ teardown() { wt_test_teardown; }
   [[ "$output" == *"bash >= 4"*"PASS"* ]]
   [[ "$output" == *"yq (mikefarah/yq)"*"PASS"* ]]
   [[ "$output" == *"git available"*"PASS"* ]]
-  [[ "$output" == *"herdr available"*"PASS"* ]]
-  [[ "$output" == *"herdr server running"*"PASS"* ]]
+  [[ "$output" != *"herdr available"* ]]
+  [[ "$output" != *"herdr server running"* ]]
   [[ "$output" == *"[fixrepo] canonical exists"*"PASS"* ]]
   [[ "$output" == *"[fixrepo] canonical on main"*"PASS"* ]]
   [[ "$output" == *"[fixrepo] canonical clean"*"PASS"* ]]
@@ -42,11 +42,6 @@ teardown() { wt_test_teardown; }
   [[ "$output" == *"[fixrepo] canonical on main"*"WARN"* ]]
 }
 
-@test "doctor fails when herdr is down" {
-  WT_HERDR_DOWN=1 run wt doctor
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"herdr server running"*"FAIL"* ]]
-}
 
 @test "doctor with missing config exits 30" {
   rm "$WT_CONFIG"

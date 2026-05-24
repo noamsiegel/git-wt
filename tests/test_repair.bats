@@ -13,13 +13,13 @@ teardown() { wt_test_teardown; }
   [ ! -d "$FIX/wt_root/.wt.lock" ]
 }
 
-@test "repair detects orphan herdr tab (cwd missing)" {
+@test "repair prunes git worktree metadata without tab reconciliation" {
   wt_quick_new dev/ABC-1-orphan
-  # remove worktree dir to create orphan tab
   rm -rf "$FIX/wt_root/ABC-1-orphan"
   run bash -c 'yes y | wt repair'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"cwd missing"* || "$output" == *"reconciling"* ]]
+  [[ "$output" == *"reconciling"* ]]
+  [[ "$output" != *"cwd missing"* ]]
 }
 
 @test "repair from forbidden root exits 20" {

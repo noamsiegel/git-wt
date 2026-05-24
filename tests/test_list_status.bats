@@ -11,13 +11,14 @@ teardown() { wt_test_teardown; }
   [[ "$output" != *"ABC-"* ]]
 }
 
-@test "list shows created worktrees with herdr tab id" {
+@test "list shows created worktrees without tab column" {
   wt_quick_new dev/ABC-1-listed
   run wt list
   [ "$status" -eq 0 ]
   [[ "$output" == *"ABC-1-listed"* ]]
   [[ "$output" == *"dev/ABC-1-listed"* ]]
-  [[ "$output" == *"herdr:"* ]]
+  [[ "$output" != *"herdr:"* ]]
+  [[ "$output" != *"TAB"* ]]
 }
 
 @test "cd returns absolute path; works from /tmp" {
@@ -61,11 +62,11 @@ teardown() { wt_test_teardown; }
   [ "$status" -eq 0 ]
 }
 
-@test "focus succeeds when tab exists" {
+@test "focus without tab plugin exits with install hint" {
   wt_quick_new dev/ABC-1-focus
   run wt focus ABC-1-focus
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"focused"* ]]
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"wt plugin install herdr"* ]]
 }
 
 # Alignment helper: strip ANSI escapes, then verify every non-blank row has consistent column count.
@@ -113,8 +114,3 @@ _strip_ansi() { sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g'; }
   done <<< "$data_rows"
 }
 
-@test "wt list TAB column shows herdr:<id> for each worktree with a tab" {
-  wt_quick_new dev/ABC-1-listed-tab
-  out=$(wt list 2>&1 | _strip_ansi)
-  [[ "$out" == *"herdr:"* ]]
-}

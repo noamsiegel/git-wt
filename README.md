@@ -9,9 +9,9 @@ same time** without conflicts. It does this by enforcing one simple rule:
 > The canonical checkout is a parking spot.
 > All real work happens in worktrees.
 
-Each worktree is isolated, gets its own herdr tab, and is auto-pushed to its
-own private branch on every commit — so work never gets trapped on local
-disk when an agent crashes or you switch contexts.
+Each worktree is isolated and auto-pushed to its own private branch on every
+commit — so work never gets trapped on local disk when an agent crashes or you
+switch contexts. Tab management is provided by plugins such as `wt-herdr`.
 
 ## Why this exists
 
@@ -38,18 +38,18 @@ by autopushing every commit to a private remote branch immediately.
 |---|---|---|
 | Canonical checkout | `repos.<name>.path` | Always on `main`. Never edited. A parking spot. |
 | Worktrees | `repos.<name>.worktree_root/<id>` | All real work. One per active branch. |
-| Herdr tabs | One per worktree | Visible anchor for switching between sessions. |
+| Tab plugins | Optional lifecycle subscribers | Visible anchors for switching between sessions. |
 
-`wt new <id>` creates a worktree, branches from `origin/main`, opens a herdr
-tab. `wt reap <id>` cleans it up when you're done.
+`wt new <id>` creates a worktree and branches from `origin/main`. `wt reap <id>`
+cleans it up when you're done. Install `wt-herdr` if you want tab creation/focus.
 
 ## Installation
 
 Requires bash >= 4, git >= 2.43, [yq](https://github.com/mikefarah/yq)
-(Go fork), [herdr](https://github.com/noamsiegel/herdr), and `realpath`.
+(Go fork), and `realpath`.
 
 ```bash
-brew install bash yq herdr
+brew install bash yq
 git clone https://github.com/noamsiegel/git-wt.git ~/.local/share/git-wt
 # Install as `git-wt` so it's invokable as `git wt`.
 ln -s ~/.local/share/git-wt/git-wt ~/.local/bin/git-wt
@@ -63,7 +63,7 @@ Then bootstrap with `wt init` to install global git hooks at
 ## Usage
 
 ```bash
-wt new noam/AUTH-123-add-sso     # new worktree off origin/main, herdr tab
+wt new noam/AUTH-123-add-sso     # new worktree off origin/main
 wt list                           # all active worktrees
 wt cd AUTH-123                    # print absolute worktree path
 wt adopt feature/wip              # move an existing branch into a worktree
@@ -132,8 +132,8 @@ Patterns support `*`, `?`, `**`. Comments start with `#`.
 
 ## Plugins (v0.3.0+)
 
-git-wt fires four lifecycle events that plugins can subscribe to:
-`wt:worktree-created`, `wt:worktree-removed`, `wt:focus`, `wt:list`.
+git-wt fires lifecycle events that plugins can subscribe to:
+`wt:worktree-created`, `wt:worktree-removed`, and `wt:focus`.
 Plugins are stand-alone executables named `wt-<name>` installed under
 `~/.local/share/git-wt/plugins/`. The contract is JSON-on-stdin so plugins
 can be written in any language.
@@ -153,9 +153,9 @@ wt plugin link /path/to/wt-mything   # symlinks instead of cloning
 wt plugin emit mything wt:focus --id repo--feature-x   # manually fire one event
 ```
 
-A reference plugin (`wt-herdr`) will ship in v0.4.0+ once the v0 contract has
-been validated by a couple of external plugins. Until then, herdr behavior is
-bundled directly in git-wt — no plugin install required.
+Install the reference tab plugin with `wt plugin install herdr`. Without a tab
+plugin, worktree commands still work; tab-only commands (`focus`, `close-tab`,
+`resume`) exit with an install hint.
 
 The contract is documented in CHANGELOG.md and is **explicitly draft (`git-wt.plugin.v0`)**.
 

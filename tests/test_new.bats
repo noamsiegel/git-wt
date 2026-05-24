@@ -4,7 +4,7 @@ load lib/setup.bash
 setup() { wt_test_setup; }
 teardown() { wt_test_teardown; }
 
-@test "happy path: wt new creates worktree, branch, herdr tab; no upstream" {
+@test "happy path: wt new creates worktree and branch; no upstream" {
   run wt new dev/ABC-1234-feature
   [ "$status" -eq 0 ]
   [ -d "$FIX/wt_root/ABC-1234-feature" ]
@@ -63,19 +63,6 @@ teardown() { wt_test_teardown; }
   [[ "$output" == *"origin"* ]]
 }
 
-@test "transactional: herdr tab create failure rolls back worktree + branch (exit 50)" {
-  WT_HERDR_FAIL_CREATE=1 run wt new dev/ABC-1-rollback
-  [ "$status" -eq 50 ]
-  [ ! -d "$FIX/wt_root/ABC-1-rollback" ]
-  run git -C "$FIX/canonical" rev-parse --verify --quiet refs/heads/dev/ABC-1-rollback
-  [ "$status" -ne 0 ]
-}
-
-@test "herdr server down → wt new exits 30 (fail-fast, no state change)" {
-  WT_HERDR_DOWN=1 run wt new dev/ABC-1-fastfail
-  [ "$status" -eq 30 ]
-  [ ! -d "$FIX/wt_root/ABC-1-fastfail" ]
-}
 
 @test "lock: concurrent wt new yields one success and one exit-40" {
   mkdir -p "$FIX/wt_root/.wt.lock"

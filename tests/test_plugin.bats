@@ -102,3 +102,45 @@ _install_fake_plugin() {
   wt plugin emit demo wt:worktree-created --id x --path /tmp/x --branch x
   grep -q "received wt:worktree-created" "$WT_PLUGIN_LOG"
 }
+
+@test "lifecycle payload JSON-escapes branch strings" {
+  local branch=$'dev/ABC-1-quote-" space-\\-newline\nend'
+  run bash -c 'source ./git-wt; _wt_plugin_lifecycle_payload "wt:worktree-created" "fixrepo" "ABC-1-json" "/tmp/path" "$1"' _ "$branch"
+  [ "$status" -eq 0 ]
+
+  parsed=$(printf '%s' "$output" | yq -p json -o tsv '.worktree.branch')
+  [ "$parsed" = "$branch" ]
+  [[ "$output" == *'"api_version": "git-wt.plugin.v0"'* ]]
+  [[ "$output" == *'"timestamp":'* ]]
+}
+
+@test "plugin emit fires once per worktree event" {
+  _install_fake_plugin demo wt:worktree-created
+  export WT_PLUGIN_LOG="$BATS_TEST_TMPDIR/plugin.log"
+  : > "$WT_PLUGIN_LOG"
+
+  run wt new dev/ABC-1-plugin-once
+  [ "$status" -eq 0 ]
+
+  count=$(grep -c "received wt:worktree-created" "$WT_PLUGIN_LOG")
+  [ "$count" -eq 1 ]
+}
+
+@test "focus without tab plugin dies with install hint" {
+  wt_quick_new dev/ABC-1-no-plugin-focus
+
+  run wt focus ABC-1-no-plugin-focus
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"requires a tab plugin handling wt:focus"* ]]
+  [[ "$output" == *"wt plugin install herdr"* ]]
+}
+
+@test "list without tab plugin succeeds without tab column" {
+  wt_quick_new dev/ABC-1-no-plugin-list
+
+  run wt list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ABC-1-no-plugin-list"* ]]
+  [[ "$output" != *"TAB"* ]]
+  [[ "$output" != *"herdr:"* ]]
+}

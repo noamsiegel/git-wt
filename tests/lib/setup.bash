@@ -11,11 +11,10 @@
 #   $FIX/config.yaml   wt config pointing at the fixture
 #   $WT_CONFIG=$FIX/config.yaml
 #   $WT_CACHE=$FIX/paths.cache
-#   $WT_HERDR_STATE=$FIX/herdr-state
-#   $PATH prepends $WT_REPO_BIN and tests/bin (herdr stub)
-
-WT_REPO_BIN="$HOME/.local/bin"
-WT_TESTS_DIR="$HOME/.config/wt/tests"
+#   $PATH prepends a per-test bin containing the repo's wt binary
+#
+WT_TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WT_REPO_ROOT="$(cd "$WT_TESTS_DIR/.." && pwd)"
 
 wt_test_setup() {
   FIX=$(mktemp -d -t wt-test.XXXXXX)
@@ -45,8 +44,8 @@ wt_test_setup() {
   git -C "$FIX/canonical2" branch -M main
   git -C "$FIX/canonical2" push --quiet -u origin main >/dev/null 2>&1
 
-  mkdir -p "$FIX/wt_root" "$FIX/wt_root2" "$FIX/herdr-state" "$FIX/omp-wt-forbidden"
-  export WT_HERDR_STATE="$FIX/herdr-state"
+  mkdir -p "$FIX/wt_root" "$FIX/wt_root2" "$FIX/omp-wt-forbidden" "$FIX/bin"
+  ln -s "$WT_REPO_ROOT/git-wt" "$FIX/bin/wt"
 
   cat > "$FIX/config.yaml" <<EOF
 repos:
@@ -75,14 +74,12 @@ EOF
   export WT_CONFIG="$FIX/config.yaml"
   export WT_CACHE="$FIX/paths.cache"
 
-  # PATH: stub herdr first, then real wt binary.
-  export PATH="$WT_TESTS_DIR/bin:$WT_REPO_BIN:$PATH"
+  # PATH: repo wt binary first.
+  export PATH="$FIX/bin:$PATH"
 
   hash -r 2>/dev/null || true   # clear bash command cache so PATH change takes effect
   # Sanity
   command -v wt >/dev/null || { echo "wt not on PATH" >&2; return 1; }
-  command -v herdr >/dev/null || { echo "herdr stub not on PATH" >&2; return 1; }
-  [[ "$(command -v herdr)" == "$WT_TESTS_DIR/bin/herdr" ]] || { echo "wrong herdr: $(command -v herdr)" >&2; return 1; }
 
   # Build the path cache so hooks can be tested against this fixture.
   if ! wt doctor --install-hooks >"$FIX/doctor.log" 2>&1; then

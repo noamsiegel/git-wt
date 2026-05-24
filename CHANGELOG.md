@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] — sourceable core, safe lifecycle JSON, plugin-only tabs
+
+### Added
+- `git-wt` can now be sourced by tests and shell tooling without auto-running `main`.
+- Lifecycle events now use one safe JSON emitter with `api_version`, timestamp, and RFC 8259 escaping via `yq`.
+
+### Changed
+- Removed bundled herdr tab management from core. Worktree create/remove/focus events are dispatched only through enabled plugins.
+- `list`, `status`, `audit`, `tidy`, and `repair` no longer read tab state directly; tab columns are omitted until plugin query events exist.
+- `focus`, `close-tab`, and `resume` now require a tab plugin and point users at `wt plugin install herdr`.
+
+### Removed
+- `WT_PLUGIN_ONLY`, `WT_HAS_HERDR`, direct `herdr` invocations, and bundled herdr helper functions.
+
 ## [0.4.0] — wt-herdr plugin available; bundled herdr deprecated
 
 ### Added

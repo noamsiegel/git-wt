@@ -47,16 +47,6 @@ teardown() { wt_test_teardown; }
   [[ "$output" == *"does not exist locally"* ]]
 }
 
-@test "adopt: rolls back herdr tab failure" {
-  cd "$FIX/canonical"
-  git switch --quiet -c dev/ABC-1-adopt-rollback
-  git commit --no-verify --quiet --allow-empty -m wip
-  git switch --quiet main
-
-  WT_HERDR_FAIL_CREATE=1 run wt adopt dev/ABC-1-adopt-rollback
-  [ "$status" -eq 50 ]
-  [ ! -d "$FIX/wt_root/ABC-1-adopt-rollback" ]
-}
 
 @test "adopt --commit-wip: dirty canonical with pending changes succeeds" {
   cd "$FIX/canonical"

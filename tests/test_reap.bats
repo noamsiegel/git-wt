@@ -64,18 +64,6 @@ teardown() { wt_test_teardown; }
   [[ "$output" == *"forbidden"* ]]
 }
 
-@test "reap refuses while agent_status=working in herdr tab" {
-  wt_quick_new dev/ABC-1-agent
-  awk -F'\t' -v OFS='\t' '$3=="ABC-1-agent"{$5="working"} {print}' \
-    "$WT_HERDR_STATE/tabs.tsv" > "$WT_HERDR_STATE/tabs.tsv.new"
-  mv "$WT_HERDR_STATE/tabs.tsv.new" "$WT_HERDR_STATE/tabs.tsv"
-  git -C "$FIX/wt_root/ABC-1-agent" commit --quiet --allow-empty -m wip
-  git -C "$FIX/wt_root/ABC-1-agent" push --quiet -u origin dev/ABC-1-agent
-
-  run wt reap ABC-1-agent
-  [ "$status" -eq 70 ]
-  [[ "$output" == *"agent"* ]]
-}
 
 # ----- lsof-based open-file detection -----
 
