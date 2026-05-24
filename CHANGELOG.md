@@ -2,10 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.5] — path-cache shell compatibility fix
+
+### Fixed
+- `wt doctor --install-hooks` now writes `WT_REPO_BY_PATH` as alternating key/value pairs in `~/.config/wt/paths.cache`, so both Bash Git hooks and Zsh prompt startup can source the same cache without arithmetic parsing errors on absolute paths like `/opt/homebrew/...`.
+
 ## [0.9.4] — path-cache shell quoting fix
 
 ### Fixed
-- `wt doctor --install-hooks` now quotes associative-array keys in `~/.config/wt/paths.cache`, so absolute paths like `/opt/homebrew/...` no longer trigger arithmetic parsing errors when shell startup sources the cache.
+- Superseded by v0.9.5; v0.9.4 fixed Bash parsing but still emitted a cache shape that Zsh prompt startup could not source correctly.
 
 ## [0.9.3] — config-required split (fix wt --version, plugin validate without config)
 
