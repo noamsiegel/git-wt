@@ -106,7 +106,7 @@ teardown() { wt_test_teardown; }
   [ ! -d "$FIX/wt_root/INFRA-99-pattern" ]
 }
 
-@test "pattern inference: ambiguous match across repos exits 10" {
+@test "pattern inference: ambiguous match across repos picks first match" {
   # Make BOTH repos accept the same pattern, then attempt creation from outside.
   cat > "$WT_CONFIG" <<EOF
 repos:
@@ -133,8 +133,9 @@ EOF
   wt doctor --install-hooks >/dev/null
   cd /tmp
   run wt new dev/ABC-7-ambig
-  [ "$status" -eq 10 ]
-  [[ "$output" == *"multiple repos"* ]]
+  [ "$status" -eq 0 ]
+  [ -d "$FIX/wt_root/ABC-7-ambig" ]
+  [ ! -d "$FIX/wt_root2/ABC-7-ambig" ]
 }
 
 @test "falls back to first repo with warning when no pattern matches" {

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] — branch policy module
+
+### Added
+- Added `branch_policy_match_repo`, `branch_policy_validate`, and `branch_policy_emit_cache` as the single branch-pattern policy surface for repo inference, runtime validation, and hook-cache generation.
+
+### Changed
+- `wt new`, branch validation, and `wt doctor --install-hooks` now consume branch patterns through the shared policy helpers so hook cache output and runtime validation stay in sync.
+
 ## [0.6.0] — worktree record stream
 
 ### Added

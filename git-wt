@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.6.0"
+WT_VERSION="0.7.0"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -254,18 +254,52 @@ wt_resolve_id() {
 }
 
 # ---------- branch / id helpers ----------
-validate_branch_shape() {
+# Return the repo name whose patterns match <branch>. Empty if no match;
+# repo name if unique match; first match if ambiguous (deterministic cfg_repos order).
+branch_policy_match_repo() {
+  local branch="$1"
+  local repo pattern
+  for repo in $(cfg_repos); do
+    while IFS= read -r pattern; do
+      [[ -z "$pattern" ]] && continue
+      if [[ "$branch" =~ $pattern ]]; then
+        printf '%s\n' "$repo"
+        return 0
+      fi
+    done < <(cfg_branch_patterns "$repo")
+  done
+  return 0
+}
+
+# Validate <branch> against <repo>'s configured pattern set.
+# Repos with no patterns allow all branch names after global length validation.
+branch_policy_validate() {
   local repo="$1" branch="$2"
-  local maxlen pattern
+  local maxlen pattern has_patterns=0
   maxlen=$(cfg_max_branch_len)
   if (( ${#branch} > maxlen )); then
     die 10 "branch name >$maxlen chars: ${branch}"
   fi
   while IFS= read -r pattern; do
     [[ -z "$pattern" ]] && continue
+    has_patterns=1
     if [[ "$branch" =~ $pattern ]]; then return 0; fi
   done < <(cfg_branch_patterns "$repo")
+  (( has_patterns == 0 )) && return 0
   die 10 "branch '$branch' does not match any configured pattern for repo '$repo'"
+}
+
+# Emit <repo>'s branch_patterns as a quoted bash array body for hook cache.
+branch_policy_emit_cache() {
+  local repo="$1" pattern
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" ]] && continue
+    printf "  %q\n" "$pattern"
+  done < <(cfg_branch_patterns "$repo")
+}
+
+validate_branch_shape() {
+  branch_policy_validate "$@"
 }
 
 # Strip up-to-first-slash prefix; fallback to verbatim.
@@ -646,7 +680,7 @@ generate_path_cache() {
     echo ')'
     for repo in $(cfg_repos); do
       printf 'WT_PATTERNS_%s=(\n' "${repo//[^a-zA-Z0-9_]/_}"
-      while IFS= read -r p; do printf "  %q\n" "$p"; done < <(cfg_branch_patterns "$repo")
+      branch_policy_emit_cache "$repo"
       printf ')\n'
     done
   } > "$tmp"
@@ -673,21 +707,10 @@ cmd_new() {
   elif cwd_info=$(repo_for_cwd 2>/dev/null); then
     repo="${cwd_info%% *}"
   else
-    # Pattern-based inference: find repos whose branch_patterns match this branch.
-    local matches=() candidate p
-    for candidate in $(cfg_repos); do
-      while IFS= read -r p; do
-        [[ -z "$p" ]] && continue
-        if [[ "$branch" =~ $p ]]; then matches+=("$candidate"); break; fi
-      done < <(cfg_branch_patterns "$candidate")
-    done
-    if (( ${#matches[@]} == 1 )); then
-      repo="${matches[0]}"
-    elif (( ${#matches[@]} == 0 )); then
+    repo=$(branch_policy_match_repo "$branch")
+    if [[ -z "$repo" ]]; then
       repo=$(cfg_repos | head -1)
       warn "branch '$branch' matches no repo pattern; defaulting to '$repo' (use --repo to override)"
-    else
-      die 10 "branch '$branch' matches multiple repos (${matches[*]}); pass --repo <name>"
     fi
   fi
   validate_branch_shape "$repo" "$branch"
