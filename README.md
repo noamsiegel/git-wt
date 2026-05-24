@@ -85,6 +85,7 @@ wt new noam/AUTH-123-add-sso     # new worktree off origin/main
 wt list                           # all active worktrees
 wt cd AUTH-123                    # print absolute worktree path
 wt adopt feature/wip              # move an existing branch into a worktree
+wt move noam/AUTH-123-add-sso    # relocate uncommitted canonical work to a new worktree
 wt reap AUTH-123                  # clean up worktree, remove branch
 wt doctor                         # diagnose setup, dependencies, hook wiring
 wt upgrade                        # git pull in the install dir

@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.9.5] — path-cache shell compatibility fix
+## [0.9.6] \u2014 wt move
+
+### Added
+- `wt move <branch>`: relocate uncommitted canonical work to a brand-new worktree. Stashes staged + unstaged + untracked in canonical, creates the worktree off `base`, and pops the stash inside it. Refuses when canonical is clean (use `wt new`) or not on the default branch (use `wt adopt --commit-wip`). On `git worktree add` failure the stash is automatically restored to canonical. Aliased as `wt mv`.
+
+## [0.9.5] \u2014 path-cache shell compatibility fix
 
 ### Fixed
 - `wt doctor --install-hooks` now writes `WT_REPO_BY_PATH` as alternating key/value pairs in `~/.config/wt/paths.cache`, so both Bash Git hooks and Zsh prompt startup can source the same cache without arithmetic parsing errors on absolute paths like `/opt/homebrew/...`.
