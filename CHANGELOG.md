@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] — conventions documented (RELEASING + TSV + JSON parser)
+
+### Added
+- `RELEASING.md`: ~60-line release checklist with pkgshare audit (formula must install `plugins-registry.json` + `docs/` + inreplace `WT_PLUGIN_REGISTRY`), recovery notes, and registry-update workflow.
+- `CONTEXT.md` TSV record convention section: cites `wt_record_fields`, explains why `IFS=$'\t'` is a footgun.
+- `docs/plugin-contract.md` JSON-parser convention: yq is canonical (already required by git-wt); Python yq is incompatible.
+
 ## [0.9.1] — architecture docs
 
 ### Added

@@ -105,6 +105,23 @@ Current v0 events:
 
 Plugin stdout for lifecycle events is ignored unless future query events define response semantics. Plugin failure warns but does not fail the originating git operation.
 
+## JSON parsing in plugins (normative)
+
+Plugins receive event payloads on stdin as JSON. The recommended parser is **[`yq`](https://github.com/mikefarah/yq)**, because:
+
+- git-wt already requires yq for its own config parsing; no new dependency.
+- Consistent across the ecosystem.
+- Stable expression syntax. Python's `yq` package is incompatible — do NOT use `pip install yq`; install the Go yq from `mikefarah/yq`.
+
+Example plugin event handler:
+
+```bash
+payload=$(cat)
+worktree_path=$(echo "$payload" | yq -p json '.worktree.path')
+```
+
+Existing plugins (`wt-zed`, `wt-cmux`, `wt-herdr`) target yq. `wt-zed` has a python3 fallback for historical reasons; new plugins should not replicate this.
+
 ## Capabilities
 
 `events` are subscriptions: what plugin wants to hear.

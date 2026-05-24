@@ -15,6 +15,14 @@ These do not change without a deliberate compatibility break.
 7. **Hook chain composes instead of owning the repo**: wt-managed global hooks do wt's safety checks, then delegate to `~/.git-hooks-personal/<hook>`, then to repo-local `.git/hooks/<name>` as described in `README.md`. This allows guardrails, Husky, lefthook, pre-commit, and custom repo hooks to coexist without git-wt knowing their internals.
 8. **Reaping is explicit and conservative**: `cmd_reap` refuses clean-up unless worktree state is clean, pushed, reachable from `origin/<default_branch>`, and no open files are detected, unless `--force` is supplied (`git-wt` lines 1136-1211). There is no background auto-cleanup.
 
+## TSV record convention
+
+Multiple helpers emit or consume TSV-shaped records (`wt_each_worktree`, `wt_resolve_id`, `cfg_repo_record`, `cfg_each_repo_record`). **Use a non-whitespace separator, never plain `\t`** — bash `read -d $'\t'` collapses adjacent empty fields, shifting column meaning.
+
+The canonical helper `wt_record_fields` handles this by emitting `\x1f` (unit separator), preserving empty fields. v0.6.0 and v0.8.0 both hit bugs from this: detached worktrees with empty branch fields, and snapshot records with 6 fields versus worktree records with 7.
+
+Consumers MUST use `wt_record_fields`, not raw bash `read`. Adding a new record type requires one helper edit, not all call sites.
+
 ## Module map
 
 ```
