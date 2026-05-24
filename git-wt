@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.9.3"
+WT_VERSION="0.9.4"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -849,8 +849,8 @@ generate_path_cache() {
     while IFS= read -r record; do
       wt_record_fields "$record" repo path wt_root _base _default _workspace
       rp_path=$(rp "$path")
-      printf "  [%q]=%q\n" "$path" "$repo"
-      [[ "$path" != "$rp_path" ]] && printf "  [%q]=%q\n" "$rp_path" "$repo"
+      printf '  ["%s"]=%q\n' "$path" "$repo"
+      [[ "$path" != "$rp_path" ]] && printf '  ["%s"]=%q\n' "$rp_path" "$repo"
     done < <(cfg_each_repo_record)
     echo ')'
     while IFS= read -r record; do

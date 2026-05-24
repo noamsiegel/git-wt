@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.4] — path-cache shell quoting fix
+
+### Fixed
+- `wt doctor --install-hooks` now quotes associative-array keys in `~/.config/wt/paths.cache`, so absolute paths like `/opt/homebrew/...` no longer trigger arithmetic parsing errors when shell startup sources the cache.
+
 ## [0.9.3] — config-required split (fix wt --version, plugin validate without config)
 
 ### Fixed
