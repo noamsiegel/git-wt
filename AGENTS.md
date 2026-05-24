@@ -14,7 +14,7 @@ This file orients agents working on **git-wt** itself. Read `CONTEXT.md` for loa
 - Never make plugin failures fail worktree creation/removal/focus unless the plugin command itself is the requested operation.
 - Never add hidden repo discovery or auto-cleanup. Managed repos and reaping stay explicit.
 - Never introduce shared cross-repo libraries or frameworks here; this repo is a small CLI with a few earned seams.
-- Dogfood `ai-trace`: AI-authored PRs must run `ai-trace pr-attach` and carry exactly one `🤖 ai-trace:` marker; direct emergency pushes without a PR must run `ai-trace gist-create` or `ai-trace collect` for local audit evidence.
+- Dogfood `agents-trace`: AI-authored PRs must run `agents-trace pr-attach` and carry exactly one `🤖 agents-trace:` marker; direct emergency pushes without a PR must run `agents-trace gist-create` or `agents-trace collect` for local audit evidence.
 
 ## Docs index
 
