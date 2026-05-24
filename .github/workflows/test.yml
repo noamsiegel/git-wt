@@ -12,7 +12,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install bash yq bats-core
+        # GNU `parallel` is needed for `bats --jobs N` which tests/run.sh
+        # uses by default (and would otherwise silently run zero tests).
+        run: brew install bash yq bats-core parallel
 
       - name: Lint shell scripts
         run: bash -n git-wt
