@@ -48,15 +48,18 @@ by autopushing every commit to a private remote branch immediately.
 cleans it up when you're done. Install `wt-herdr` if you want tab creation/focus.
 
 
-## Competitive position
+## How it compares
 
-| Tool | What they do | What we do that they do not |
-|---|---|---|
-| Worktrunk | Broad Rust worktree UX: picker, status columns, merge flow, PR checkout, hooks, dev-server and cache helpers. | Smaller policy/safety layer: canonical checkout parking, commit-time autopush, branch-pattern hook gates, forbidden roots, language-agnostic tab plugin contract. Worktrunk is stronger general worktree UX. |
-| wtp (Worktree Plus) | Go worktree manager with path generation, `.wtp.yml`, copy/symlink/command post-create hooks, shell completion. | Enforces agent-safety invariants instead of only environment setup: no canonical commits, immediate remote persistence, per-repo XDG policy, plugin lifecycle. |
-| gwq | Global worktree dashboard/navigation with fuzzy finder, tmux integration, JSON output, status watch. | Safety-policy-first hooks, autopush, canonical parking, branch validation, and tmux/tab integration behind plugin protocol rather than built in. |
-| git-spice | Stacked branch/PR workflow for GitHub/GitLab/Bitbucket; worktree-aware but not worktree-first. | Owns worktree session lifecycle and safety; no PR/stack management. Can coexist as lower-level workspace layer. |
-| Git Town | Mature high-level Git workflow: branch lineage, sync/ship/propose, broad forge support, undo/runlog. | Worktree-specific parking/autopush/forbidden-root model plus tab plugin API. Git Town owns branch workflow; git-wt owns worktree session safety. |
+| Tool | What it manages | Where state lives | When it acts |
+|---|---|---|---|
+| **git-wt** | Git worktree session safety: canonical parking, branch-pattern gates, autopush, plugin lifecycle | Per-user XDG config at `~/.config/wt/config.yaml`; Git worktrees under configured roots; plugins under `~/.local/share/git-wt/plugins/` | On `wt` commands plus git hook boundaries: pre-commit, post-commit, pre-push, post-checkout |
+| Worktrunk | Broad worktree UX: picker, status, hooks, PR checkout, merge/dev-server/cache helpers | Tool config + worktree directories; exact state model belongs to Worktrunk | On CLI commands; hooks/automation when configured |
+| wtp (Worktree Plus) | Worktree creation/navigation and environment bootstrap | Project-local `.wtp.yml` plus generated worktree paths | On CLI commands; post-create copy/symlink/command hooks |
+| gwq | Global worktree discovery, dashboard, fuzzy navigation, tmux integration | Global gwq-managed worktree inventory and Git worktree state | On CLI commands; status watch for monitoring |
+| git-spice / Git Town / Graphite | Stacked branch and PR workflow | Git branches plus each tool's workflow metadata/platform state | When creating, restacking, submitting, syncing, or shipping branches |
+| jj (Jujutsu) | Alternative Git-compatible VCS model | jj repo metadata with Git compatibility | During everyday VCS operations; substitutes for some Git branch/worktree workflows rather than wrapping them |
+
+See [`docs/COMPARISON.md`](./docs/COMPARISON.md) for narrative detail and coexistence guidance.
 
 ## Installation
 
@@ -90,6 +93,8 @@ wt version --latest               # check upstream for updates
 
 ## Configuration
 
+Minimal example:
+
 ```yaml
 # ~/.config/wt/config.yaml
 defaults:
@@ -100,16 +105,13 @@ repos:
   my-monorepo:
     path: ~/code/my-monorepo
     worktree_root: ~/code/worktrees/my-monorepo
-    base: main
+    base: origin/main
     branch_patterns:
       - '^(yourname)/[A-Z]+-[0-9]+-[a-z0-9-]+$'
       - '^pr-[0-9]+$'
-
-  other-repo:
-    path: ~/code/other
-    worktree_root: ~/code/worktrees/other
-    base: main
 ```
+
+See [`docs/CONFIG.md`](./docs/CONFIG.md) for every field, default, validation rule, and safety consequence.
 
 ## Hook chain
 
@@ -191,13 +193,14 @@ plugin, worktree commands still work; tab-only commands (`focus`, `close-tab`,
 | Allow pushing branch not matching pattern | `WT_HOOK_ENFORCE_BRANCH_NAMES=false` (per-shell) or `git push --no-verify` |
 | Uninstall completely | `git config --global --unset core.hooksPath` and remove the directory |
 
-## Non-goals
+## What it doesn't do
 
-- Replacing Graphite or any other stacked-PR tool — `wt` doesn't talk to
-  PR systems.
-- Auto-discovering repos. You add repos by editing the config.
-- A TUI. `wt list` / `wt status` are line-oriented.
-- Auto-cleanup. Reaping is always explicit.
+- Replace stacked-PR tools. `wt` does not create, restack, submit, or merge PR stacks; use Graphite, git-spice, or Git Town for that layer.
+- Auto-discover repositories. Managed repos are explicit entries in `~/.config/wt/config.yaml`; hidden global scans are out of scope.
+- Provide a TUI, dashboard, or fuzzy picker. `wt list`, `wt status`, `wt tidy`, and `wt audit` stay line-oriented and scriptable.
+- Auto-clean up worktrees. Reaping remains explicit because deleting active agent work is riskier than leaving a visible worktree behind.
+- Host a plugin marketplace or auto-update third-party plugins. Bare names resolve only through the curated local registry; explicit installs are user-trust.
+- Enforce security policy by itself. Git hooks are personal safety rails and can be bypassed; hard compliance belongs in server-side rules.
 
 ## License
 

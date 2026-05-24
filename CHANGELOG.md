@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] — architecture docs
+
+### Added
+- `CONTEXT.md` with load-bearing invariants, module map, real vs hypothetical seams, public API stability, and ADRs.
+- `AGENTS.md` orienting agents working on this repo itself.
+- `docs/COMPARISON.md` with full narrative competitor analysis (Worktrunk, wtp, gwq, git-spice, Git Town, Graphite, jj) and coexistence guidance.
+- `docs/CONFIG.md`: full `~/.config/wt/config.yaml` reference — every field, default, validation rule, and safety consequence.
+- `docs/plugins.md`: shared comparison table for the wt-* plugin family (consumed by each plugin’s README).
+
+### Changed
+- `README.md` competitive section reformatted to the agents-toc-style table (`Tool | What it manages | Where state lives | When it acts`) and links to the new comparison doc.
+- Renamed and sharpened `## Non-goals` as `## What it doesn’t do`.
+- Minimal-config example now uses `base: origin/main` to match actual `wt new` fetch/start behavior.
+
 ## [0.9.0] — full-hybrid plugin ecosystem
 
 ### Added
