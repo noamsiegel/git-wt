@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.5.0"
+WT_VERSION="0.6.0"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -148,15 +148,10 @@ guard_not_canonical() {
 # ---------- repo resolution ----------
 # Determine which configured repo this id belongs to by searching every worktree_root.
 repo_for_id() {
-  local id="$1" repo wt_root
-  for repo in $(cfg_repos); do
-    wt_root=$(cfg_repo_get "$repo" worktree_root)
-    if [[ -d "$wt_root/$id" ]]; then
-      echo "$repo"
-      return 0
-    fi
-  done
-  return 1
+  local id="$1" record repo _id _path _rp_path _branch _sha _is_canonical
+  record=$(wt_resolve_id "$id") || return 1
+  wt_record_fields "$record" repo _id _path _rp_path _branch _sha _is_canonical
+  echo "$repo"
 }
 
 # Determine canonical or worktree context from $PWD; outputs "<repo> <kind>".
@@ -176,6 +171,86 @@ repo_for_cwd() {
     fi
   done
   return 1
+}
+
+# Emit one TSV record per worktree for <repo>:
+#   repo\tid\tpath\trp_path\tbranch\tsha\tis_canonical
+# is_canonical is the string "canonical" or "worktree".
+wt_each_worktree() {
+  local repo="$1" canonical wt_root id path rp_path branch sha is_canonical line key value
+  canonical=$(cfg_repo_get "$repo" path)
+  wt_root=$(cfg_repo_get "$repo" worktree_root)
+
+  path=""; rp_path=""; branch=""; sha=""; is_canonical=""
+  _wt_emit_worktree_record() {
+    [[ -n "$path" ]] || return 0
+    id="${path##*/}"
+    rp_path=$(rp "$path")
+    if [[ "$rp_path" == "$(rp "$canonical")" ]]; then
+      is_canonical="canonical"
+      path="$canonical"
+      id="${path##*/}"
+    else
+      is_canonical="worktree"
+      if [[ "$rp_path" == "$(rp "$wt_root/$id")" ]]; then
+        path="$wt_root/$id"
+      fi
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$id" "$path" "$rp_path" "$branch" "$sha" "$is_canonical"
+  }
+
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      _wt_emit_worktree_record
+      path="${line#worktree }"
+      branch=""
+      sha=""
+      continue
+    fi
+    [[ -n "$path" ]] || continue
+    key="${line%% *}"
+    value=""
+    [[ "$line" == *" "* ]] && value="${line#* }"
+    case "$key" in
+      HEAD) sha="${value:0:10}" ;;
+      branch) branch="${value#refs/heads/}" ;;
+      detached|bare) branch="" ;;
+    esac
+  # Single git worktree list --porcelain adapter.
+  done < <(git_in "$canonical" worktree list --porcelain 2>/dev/null)
+  _wt_emit_worktree_record
+  unset -f _wt_emit_worktree_record
+}
+
+wt_record_fields() {
+  local _record="${1//$'\t'/$'\034'}"
+  IFS=$'\034' read -r "$2" "$3" "$4" "$5" "$6" "$7" "$8" <<< "$_record"
+}
+
+# Resolve <id> to one TSV worktree record, optionally constrained with --repo <repo>.
+wt_resolve_id() {
+  local repo_filter="" id repo record r_repo r_id r_path r_rp_path r_branch r_sha r_is_canonical match="" count=0
+  if [[ "${1:-}" == "--repo" ]]; then
+    repo_filter="${2:-}"
+    id="${3:-}"
+  else
+    id="${1:-}"
+  fi
+  [[ -n "$id" ]] || return 1
+
+  for repo in $(cfg_repos); do
+    [[ -z "$repo_filter" || "$repo" == "$repo_filter" ]] || continue
+    while IFS= read -r record; do
+      wt_record_fields "$record" r_repo r_id r_path r_rp_path r_branch r_sha r_is_canonical
+      [[ "$r_is_canonical" == "worktree" ]] || continue
+      [[ "$r_id" == "$id" ]] || continue
+      match="$r_repo"$'\t'"$r_id"$'\t'"$r_path"$'\t'"$r_rp_path"$'\t'"$r_branch"$'\t'"$r_sha"$'\t'"$r_is_canonical"
+      count=$((count + 1))
+    done < <(wt_each_worktree "$repo")
+  done
+
+  [[ "$count" -eq 1 ]] || return 1
+  printf '%s\n' "$match"
 }
 
 # ---------- branch / id helpers ----------
@@ -388,8 +463,13 @@ branch_exists_origin() {
   git_in "$1" ls-remote --exit-code --heads origin "$2" >/dev/null 2>&1
 }
 wt_dir_registered() {
-  local canonical="$1" path="$2"
-  git_in "$canonical" worktree list --porcelain | grep -q "^worktree $path$"
+  local repo="$1" target="$2" record r_repo r_id path rp_path branch sha is_canonical target_rp
+  target_rp=$(rp "$target")
+  while IFS= read -r record; do
+    wt_record_fields "$record" r_repo r_id path rp_path branch sha is_canonical
+    [[ "$rp_path" == "$target_rp" ]] && return 0
+  done < <(wt_each_worktree "$repo")
+  return 1
 }
 
 # Copy gitignored files matching .worktreeinclude patterns from canonical
@@ -624,7 +704,7 @@ cmd_new() {
 
   acquire_lock "$wt_root"
   [[ -e "$target" ]] && die 20 "target path already exists: $target"
-  wt_dir_registered "$canonical" "$target" && die 20 "target path already registered as a worktree"
+  wt_dir_registered "$repo" "$target" && die 20 "target path already registered as a worktree"
   branch_exists_local "$canonical" "$branch" && die 20 "branch already exists locally: $branch"
   branch_exists_origin "$canonical" "$branch" && die 20 "branch already exists on origin: $branch"
 
@@ -774,19 +854,14 @@ cmd_list() {
     canonical=$(cfg_repo_get "$repo" path)
     wt_root=$(cfg_repo_get "$repo" worktree_root)
     printf '%s\n' "$(green "[$repo]") canonical=$canonical worktree_root=$wt_root"
-    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
     {
       printf 'ID\tSHA\tBRANCH\n'
-      echo "$rows" | awk '
-        /^worktree / { path=$2; next }
-        /^HEAD / { sha=substr($2,1,10); next }
-        /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
-        /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
-      ' | while IFS=$'\t' read -r path sha ref; do
-        [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
-        local id="${path##*/}"
-        printf '%s\t%s\t%s\n' "$id" "$sha" "$ref"
-      done
+      while IFS= read -r record; do
+        wt_record_fields "$record" _repo id path _rp_path branch sha is_canonical
+        [[ "$is_canonical" == "worktree" ]] || continue
+        [[ -n "$branch" ]] || branch="(detached)"
+        printf '%s\t%s\t%s\n' "$id" "$sha" "$branch"
+      done < <(wt_each_worktree "$repo")
     } | column -t -s $'\t' | sed '1 s/^/  /; 2,$ s/^/  /'
   done
 }
@@ -803,22 +878,18 @@ cmd_status() {
     default_branch=$(cfg_repo_get "$repo" default_branch)
     (( refresh == 1 )) && git_in "$canonical" fetch origin "$default_branch" --quiet 2>/dev/null || true
     printf '%s\n' "$(green "[$repo]")"
-    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
     {
       printf 'ID\tCLEAN\tPUSHED\tREACH\tBRANCH\n'
-      echo "$rows" | awk '
-        /^worktree / { path=$2; next }
-        /^HEAD / { sha=substr($2,1,10); next }
-        /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
-        /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
-      ' | while IFS=$'\t' read -r path sha ref; do
-        [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
-        local id="${path##*/}" c p r
+      while IFS= read -r record; do
+        wt_record_fields "$record" _repo id path _rp_path branch _sha is_canonical
+        [[ "$is_canonical" == "worktree" ]] || continue
+        [[ -n "$branch" ]] || branch="(detached)"
+        local c p r
         is_clean "$path" && c=yes || c=no
         is_pushed "$path" && p=yes || p=no
         reachable_from "$path" "$default_branch" && r=yes || r=no
-        printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$c" "$p" "$r" "$ref"
-      done
+        printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$c" "$p" "$r" "$branch"
+      done < <(wt_each_worktree "$repo")
     } | column -t -s $'\t' | sed 's/^/  /'
   done
 }
@@ -842,18 +913,13 @@ cmd_audit() {
     canonical=$(cfg_repo_get "$repo" path)
     default_branch=$(cfg_repo_get "$repo" default_branch)
     (( fetch == 1 )) && git_in "$canonical" fetch origin "$default_branch" --quiet 2>/dev/null || true
-    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
-    echo "$rows" | awk '
-      /^worktree / { path=$2; next }
-      /^HEAD / { sha=substr($2,1,10); next }
-      /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
-      /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
-    ' | while IFS=$'\t' read -r path sha ref; do
-      [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
-      [[ "$ref" == "(detached)" ]] && continue
+    while IFS= read -r record; do
+      wt_record_fields "$record" _repo id path _rp_path branch _sha is_canonical
+      [[ "$is_canonical" == "worktree" ]] || continue
+      [[ -n "$branch" ]] || continue
       [[ -d "$path" ]] || continue
       reachable_from "$path" "$default_branch" && continue
-      local id="${path##*/}" status detail ahead_of_main ahead_of_up upstream
+      local status detail ahead_of_main ahead_of_up upstream
       ahead_of_main=$(git_in "$path" rev-list --count "origin/$default_branch..HEAD" 2>/dev/null || echo 0)
       if upstream=$(git_in "$path" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
         ahead_of_up=$(git_in "$path" rev-list --count "$upstream..HEAD" 2>/dev/null || echo 0)
@@ -868,8 +934,8 @@ cmd_audit() {
         status="unpushed"
         detail="no upstream"
       fi
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$id" "$ref" "$ahead_of_main" "$status" "$detail"
-    done
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$id" "$branch" "$ahead_of_main" "$status" "$detail"
+    done < <(wt_each_worktree "$repo")
   done
 }
 
@@ -888,12 +954,13 @@ cmd_reap() {
 
   local id repo
   for id in "${ids[@]}"; do
-    repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
-    local canonical wt_root default_branch path
+    local record path branch rp_path
+    record=$(wt_resolve_id "$id") || die 20 "no worktree '$id' in any configured repo"
+    wt_record_fields "$record" repo id path rp_path branch _sha _is_canonical
+    local canonical wt_root default_branch
     canonical=$(cfg_repo_get "$repo" path)
     wt_root=$(cfg_repo_get "$repo" worktree_root)
     default_branch=$(cfg_repo_get "$repo" default_branch)
-    path="$wt_root/$id"
 
     # Safety
     local refusals=()
@@ -925,11 +992,6 @@ cmd_reap() {
 
     acquire_lock "$wt_root"
     # 1. remove worktree
-    local rp_path=$(rp "$path")
-    local branch=""
-    branch=$(git_in "$canonical" worktree list --porcelain 2>/dev/null \
-              | awk -v p="$path" -v rp="$rp_path" 'BEGIN{f=0} $1=="worktree"{f=($2==p || $2==rp)} f && $1=="branch"{print $2; exit}')
-    branch="${branch#refs/heads/}"
     if [[ -d "$path" ]]; then
       if ! git_in "$canonical" worktree remove "$path" --force >/dev/null 2>&1; then
         die 60 "git worktree remove failed; run 'wt repair' to reconcile"
@@ -958,11 +1020,9 @@ cmd_cd() {
   guard_not_canonical
   local id="${1:-}"
   [[ -n "$id" ]] || die 10 "usage: wt cd <id>"
-  local repo
-  repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
-  local wt_root path
-  wt_root=$(cfg_repo_get "$repo" worktree_root)
-  path="$wt_root/$id"
+  local record repo path _id _rp_path _branch _sha _is_canonical
+  record=$(wt_resolve_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  wt_record_fields "$record" repo _id path _rp_path _branch _sha _is_canonical
   echo "$path"
 }
 
@@ -971,12 +1031,9 @@ cmd_focus() {
   local id="${1:-}"
   [[ -n "$id" ]] || die 10 "usage: wt focus <id>"
   require_tab_plugin "focus"
-  local repo
-  repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
-  local wt_root path branch
-  wt_root=$(cfg_repo_get "$repo" worktree_root)
-  path="$wt_root/$id"
-  branch=$(git_in "$path" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  local record repo path branch _id _rp_path _sha _is_canonical
+  record=$(wt_resolve_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  wt_record_fields "$record" repo _id path _rp_path branch _sha _is_canonical
   wt_plugin_emit_lifecycle "wt:focus" "$repo" "$id" "$path" "$branch"
   green "focused "
   printf '%s
@@ -1002,13 +1059,10 @@ cmd_resume() {
   local id="${1:-}"
   [[ -n "$id" ]] || die 10 "usage: wt resume <id>"
   require_tab_plugin "resume"
-  local repo
-  repo=$(repo_for_id "$id") || die 20 "no worktree '$id' in any configured repo"
-  local wt_root path branch
-  wt_root=$(cfg_repo_get "$repo" worktree_root)
-  path="$wt_root/$id"
+  local record repo path branch _id _rp_path _sha _is_canonical
+  record=$(wt_resolve_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  wt_record_fields "$record" repo _id path _rp_path branch _sha _is_canonical
   [[ -d "$path" ]] || die 20 "worktree path missing: $path"
-  branch=$(git_in "$path" symbolic-ref --short HEAD 2>/dev/null || echo "")
   wt_plugin_emit_lifecycle "wt:focus" "$repo" "$id" "$path" "$branch"
   green "ready "
   printf '%s
@@ -1034,17 +1088,13 @@ cmd_tidy() {
     default_branch=$(cfg_repo_get "$repo" default_branch)
     (( refresh == 1 )) && git_in "$canonical" fetch origin "$default_branch" --quiet 2>/dev/null || true
     printf '%s\n' "$(green "[$repo]") tidy report"
-    local rows; rows=$(git_in "$canonical" worktree list --porcelain 2>/dev/null) || continue
     {
       printf 'GROUP\tID\tBRANCH\tACTION\n'
-      echo "$rows" | awk '
-        /^worktree / { path=$2; next }
-        /^HEAD / { sha=substr($2,1,10); next }
-        /^branch / { ref=$2; sub(/^refs\/heads\//,"",ref); printf "%s\t%s\t%s\n", path, sha, ref; next }
-        /^detached/ { printf "%s\t%s\t(detached)\n", path, sha; next }
-      ' | while IFS=$'\t' read -r path sha ref; do
-        [[ "$(rp "$path")" == "$(rp "$canonical")" ]] && continue
-        local id="${path##*/}" clean pushed reach group action
+      while IFS= read -r record; do
+        wt_record_fields "$record" _repo id path _rp_path branch _sha is_canonical
+        [[ "$is_canonical" == "worktree" ]] || continue
+        [[ -n "$branch" ]] || branch="(detached)"
+        local clean pushed reach group action
         is_clean "$path" && clean=yes || clean=no
         is_pushed "$path" && pushed=yes || pushed=no
         reachable_from "$path" "$default_branch" && reach=yes || reach=no
@@ -1055,11 +1105,12 @@ cmd_tidy() {
         else
           group="needs-review"; action="inspect before reaping"
         fi
-        printf '%s\t%s\t%s\t%s\n' "$group" "$id" "$ref" "$action"
-      done
+        printf '%s\t%s\t%s\t%s\n' "$group" "$id" "$branch" "$action"
+      done < <(wt_each_worktree "$repo")
     } | column -t -s $'\t' | sed 's/^/  /'
   done
 }
+
 cmd_repair() {
   guard_forbidden
   local repo
@@ -1068,6 +1119,7 @@ cmd_repair() {
     canonical=$(cfg_repo_get "$repo" path)
     wt_root=$(cfg_repo_get "$repo" worktree_root)
     info "[$repo] reconciling"
+    wt_each_worktree "$repo" >/dev/null || true
     git_in "$canonical" worktree prune -v 2>&1 | sed 's/^/  /' || true
     if [[ -d "$wt_root/.wt.lock" ]]; then
       local locker ans

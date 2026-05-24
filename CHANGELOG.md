@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] — worktree record stream
+
+### Added
+- Added `wt_each_worktree` and `wt_resolve_id` as the single TSV domain stream for worktree identity, realpaths, branches, SHAs, and canonical/worktree classification.
+
+### Changed
+- `list`, `status`, `audit`, `reap`, `tidy`, `repair`, and id consumers now use the shared worktree record stream instead of reparsing porcelain output independently.
+
 ## [0.5.0] — sourceable core, safe lifecycle JSON, plugin-only tabs
 
 ### Added

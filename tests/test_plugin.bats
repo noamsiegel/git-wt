@@ -105,7 +105,7 @@ _install_fake_plugin() {
 
 @test "lifecycle payload JSON-escapes branch strings" {
   local branch=$'dev/ABC-1-quote-" space-\\-newline\nend'
-  run bash -c 'source ./git-wt; _wt_plugin_lifecycle_payload "wt:worktree-created" "fixrepo" "ABC-1-json" "/tmp/path" "$1"' _ "$branch"
+  run bash -c 'source "$1"; _wt_plugin_lifecycle_payload "wt:worktree-created" "fixrepo" "ABC-1-json" "/tmp/path" "$2"' _ "$WT_REPO_ROOT/git-wt" "$branch"
   [ "$status" -eq 0 ]
 
   parsed=$(printf '%s' "$output" | yq -p json -o tsv '.worktree.branch')
