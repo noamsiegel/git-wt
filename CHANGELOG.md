@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.9.7] — version --latest crash fix
 
 ### Fixed
 - `wt version --latest` no longer aborts with `local_sha: unbound variable` on non-clone installs (e.g. Homebrew). The non-clone branch set only `upstream_sha`, so the later `[[ -n "$local_sha" … ]]` comparison tripped `set -u`; both variables are now initialized to empty.
