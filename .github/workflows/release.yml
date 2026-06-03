@@ -100,7 +100,7 @@ jobs:
           [ -n "$sha" ] || { echo "::error::failed to compute sha256 for $url"; exit 1; }
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
           echo "tarball $url -> sha256 $sha"
-      - uses: mislav/bump-homebrew-formula-action@v3
+      - uses: mislav/bump-homebrew-formula-action@v4.1
         with:
           formula-name: git-wt
           formula-path: Formula/git-wt.rb
