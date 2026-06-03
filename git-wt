@@ -1790,7 +1790,9 @@ cmd_version() {
 
   # Check upstream. Use the install dir's git remote if it's a clone, else
   # fall back to the canonical upstream.
-  local install_dir upstream_sha local_sha
+  # Default to empty: the non-clone branch below sets only upstream_sha, and
+  # the comparisons read $local_sha unconditionally under `set -u`.
+  local install_dir upstream_sha="" local_sha=""
   install_dir=$(wt_install_dir)
   if [[ -d "$install_dir/.git" ]] || [[ -f "$install_dir/.git" ]]; then
     local_sha=$(git -C "$install_dir" rev-parse HEAD 2>/dev/null || echo "")
