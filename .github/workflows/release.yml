@@ -87,6 +87,19 @@ jobs:
     if: always() && (needs.release.result == 'success' || github.event_name == 'push')
     runs-on: ubuntu-latest
     steps:
+      # Precompute the tarball sha256 so the action doesn't fetch the archive
+      # itself: GitHub returns HTTP 303 on archive redirects, which the action
+      # does not follow (it handles only 301/302) and aborts with
+      # "unexpected HTTP 303 response". curl -fsSL follows the redirect.
+      - name: Compute release tarball sha256
+        id: tarball
+        run: |
+          tag="${{ needs.release.outputs.tag_name || github.ref_name }}"
+          url="https://github.com/noamsiegel/git-wt/archive/refs/tags/${tag}.tar.gz"
+          sha=$(curl -fsSL "$url" | sha256sum | awk '{print $1}')
+          [ -n "$sha" ] || { echo "::error::failed to compute sha256 for $url"; exit 1; }
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "tarball $url -> sha256 $sha"
       - uses: mislav/bump-homebrew-formula-action@v3
         with:
           formula-name: git-wt
@@ -94,5 +107,6 @@ jobs:
           homebrew-tap: noamsiegel/homebrew-tap
           tag-name: ${{ needs.release.outputs.tag_name || github.ref_name }}
           download-url: https://github.com/noamsiegel/git-wt/archive/refs/tags/${{ needs.release.outputs.tag_name || github.ref_name }}.tar.gz
+          download-sha256: ${{ steps.tarball.outputs.sha256 }}
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
