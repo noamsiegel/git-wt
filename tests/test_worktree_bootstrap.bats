@@ -104,3 +104,23 @@ EOF
   [ "$status" -eq 0 ]
   grep -q 'uv sync' "$FIX/uv-calls"
 }
+
+@test "setup_command: auto allows root and nested tracked .envrc" {
+  # fake direnv on PATH (\$FIX/bin is first) that records its allow targets
+  printf '#!/usr/bin/env bash\necho "%s" >> "%s/direnv-calls"\n' '$*' "$FIX" > "$FIX/bin/direnv"
+  chmod +x "$FIX/bin/direnv"
+  # root + nested .envrc on origin/main so the new worktree checks them out
+  echo "export ROOT=1" > "$FIX/canonical/.envrc"
+  mkdir -p "$FIX/canonical/sub"
+  echo "export SUB=1" > "$FIX/canonical/sub/.envrc"
+  git -C "$FIX/canonical" add .envrc sub/.envrc
+  git -C "$FIX/canonical" commit --no-verify -q -m "add nested .envrc"
+  git -C "$FIX/canonical" push -q origin main
+  _write_config "    setup_command: auto"
+  run wt new dev/ABC-1-envrc
+  [ "$status" -eq 0 ]
+  # both the root and the nested tracked .envrc were authorized
+  grep -q '^allow \.$' "$FIX/direnv-calls"
+  grep -q 'allow sub/.envrc' "$FIX/direnv-calls"
+  [[ "$output" == *"direnv allow (2 .envrc)"* ]]
+}
