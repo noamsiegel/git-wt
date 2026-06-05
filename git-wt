@@ -845,12 +845,26 @@ run_setup_auto() {
   _auto_run pnpm-lock.yaml pnpm pnpm install
   _auto_run yarn.lock yarn yarn install
   _auto_run package-lock.json npm npm ci
-  if [[ -e "$target/.envrc" ]] && have direnv; then
-    ran=1
-    info "$(dim "→ auto-setup: direnv allow")"
-    ( cd "$target" && direnv allow . >/dev/null 2>&1 ) || true
+  # Authorize direnv: the root .envrc (allow on existence — it may be
+  # gitignored or symlinked in) plus every *tracked* nested .envrc. Tracked =
+  # committed = already trusted, and it covers monorepo-shaped repos whose
+  # per-project hooks `direnv exec <subdir>` would otherwise hit a blocked
+  # .envrc on a fresh worktree.
+  if have direnv; then
+    local envrc envrc_n=0
+    if [[ -e "$target/.envrc" ]]; then
+      if ( cd "$target" && direnv allow . >/dev/null 2>&1 ); then envrc_n=$((envrc_n + 1)); fi
+    fi
+    while IFS= read -r envrc; do
+      [[ -f "$target/$envrc" ]] || continue
+      if ( cd "$target" && direnv allow "$envrc" >/dev/null 2>&1 ); then envrc_n=$((envrc_n + 1)); fi
+    done < <(git -C "$target" ls-files 2>/dev/null | grep -E '/\.envrc$' || true)
+    if (( envrc_n > 0 )); then
+      ran=1
+      info "$(dim "→ auto-setup: direnv allow (${envrc_n} .envrc)")"
+    fi
   fi
-  if (( ran == 0 )); then info "$(dim "→ auto-setup: nothing to do (no lockfile/.envrc at worktree root)")"; fi
+  if (( ran == 0 )); then info "$(dim "→ auto-setup: nothing to do (no lockfile/.envrc in worktree)")"; fi
   return 0
 }
 
