@@ -1055,7 +1055,8 @@ generate_path_cache() {
     while IFS= read -r record; do
       wt_record_fields "$record" repo path wt_root _base _default _workspace
       rp_path=$(rp "$path")
-      printf "%q %q " "$path" "$rp_path"
+      printf "%q " "$path"
+      [[ "$path" != "$rp_path" ]] && printf "%q " "$rp_path"
     done < <(cfg_each_repo_record)
     printf ')\n'
     printf 'WT_REPO_NAMES=('

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.7] — hook cache repo lookup alignment
+
+### Fixed
+- `wt_repo_by_path` now emits one repo name per cached repo path, keeping `WT_REPO_PATHS` and `WT_REPO_NAMES` aligned when canonical paths and realpaths are identical.
+
 ## [v0.10.6] — Bash 3-compatible hook cache
 
 ### Fixed

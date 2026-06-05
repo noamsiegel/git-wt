@@ -30,6 +30,9 @@ teardown() { wt_test_teardown; }
   run /bin/bash -c "source '$WT_CACHE'; wt_repo_by_path '$FIX/canonical'"
   [ "$status" -eq 0 ]
   [ "$output" = "fixrepo" ]
+  run /bin/bash -c "source '$WT_CACHE'; wt_repo_by_path '$FIX/canonical2'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "fixrepo2" ]
 }
 
 @test "doctor reports dirty canonical as WARN, not FAIL" {
