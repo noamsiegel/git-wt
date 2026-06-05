@@ -90,6 +90,8 @@ wt move noam/AUTH-123-add-sso    # relocate uncommitted canonical work to a new 
 wt reap AUTH-123                  # clean up worktree, remove branch
 wt doctor                         # diagnose setup, dependencies, hook wiring
 wt doctor --worktree AUTH-123     # per-worktree health: env symlinks, deps, hooks, prunable
+wt install-hooks                  # restore the wt guard in a repo whose local core.hooksPath bypasses it
+wt uninstall-hooks                # revert install-hooks (restore original core.hooksPath)
 wt upgrade                        # git pull in the install dir
 wt version --latest               # check upstream for updates
 ```
@@ -132,8 +134,10 @@ them.
 
 > **Note:** a repo that sets a *local* `core.hooksPath` (e.g. a team-managed
 > `.githooks` directory) overrides wt's global hooks and bypasses wt's
-> guardrails for that repo. `wt doctor` detects and warns about this; it does
-> not rewrite your hook configuration.
+> guardrails for that repo. `wt doctor` detects and warns about this. Run
+> `wt install-hooks --repo <name>` (or from inside the repo) to route that
+> repo's hooks through the wt guard **and** its existing hooks; `wt
+> uninstall-hooks` reverts it.
 
 ## Copying gitignored files into worktrees (`.worktreeinclude`)
 
@@ -189,6 +193,36 @@ See [`docs/CONFIG.md`](./docs/CONFIG.md#worktree-bootstrap) for details.
 - `wt list`, `wt status`, and `wt cd` are read-only and work from inside a
   canonical checkout. External (forbidden-root) worktrees are marked
   `(external)` in `list`/`status`; `wt cd` to one prints the path but warns.
+
+## Restoring the wt guard with `wt install-hooks`
+
+Git's `core.hooksPath` is single-valued: if a repo sets a **local**
+`core.hooksPath` (a team-managed `.githooks`, husky, lefthook, etc.) it
+overrides wt's **global** hooks, so wt's canonical-commit guard never runs
+there. `wt install-hooks` fixes this without giving up the team hooks:
+
+```bash
+wt install-hooks --repo monorepo   # or just run from inside the repo
+```
+
+It points the repo's local `core.hooksPath` at a generated dispatcher
+(`~/.config/wt/repo-hooks/<repo>/`) whose hooks:
+
+1. run the wt guardrail (`wt hook-run`) — refuses commits in the canonical
+   checkout, and validates branch names on push when `hooks.enforce_branch_names`
+   is on;
+2. then chain the repo's original hooks (whatever `core.hooksPath` pointed at
+   before install).
+
+The guard is **fail-open**: if wt is missing or broken, the dispatcher never
+blocks your commit. It is idempotent, and reversible at any time:
+
+```bash
+wt uninstall-hooks --repo monorepo
+```
+
+`wt doctor` lists which repos have a local-`core.hooksPath` override, so you
+know where `install-hooks` is worth running.
 
 ## Plugins (v0.9.0+)
 

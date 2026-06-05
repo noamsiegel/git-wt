@@ -101,10 +101,11 @@ The following shipped in `git-wt` + `tests/` (see CHANGELOG `[Unreleased]`):
 | External labeling + read-only-from-canonical | `cmd_list`, `cmd_status`, `cmd_cd` | `list`/`status` mark `(external)`; `cd` warns but prints path; all three dropped the canonical guard. |
 | `wt doctor --worktree <id>` | `cmd_doctor_worktree` | Read-only health: symlinks, `node_modules`, `.venv`, direnv, effective `core.hooksPath`, prunable metadata. |
 | Local `core.hooksPath` override detection | `cmd_doctor` | Per-repo WARN when a local hooksPath bypasses wt's global hooks. |
+| Hook dispatcher (`wt install-hooks` / `uninstall-hooks` / `hook-run`) | `cmd_install_hooks`, `cmd_uninstall_hooks`, `cmd_hook_run` | Routes a repo's local `core.hooksPath` through a wt dispatcher: runs the fail-open wt guard, then chains the repo's original hooks. Reversible, idempotent. Restores the canonical-commit guard in repos (monorepo/hoa) whose local hooksPath bypassed wt. |
 
-Covered by `tests/test_doctor.bats`, `tests/test_list_status.bats`, and the new `tests/test_worktree_bootstrap.bats` (full suite: 152 bats tests green).
+Covered by `tests/test_doctor.bats`, `tests/test_list_status.bats`, `tests/test_worktree_bootstrap.bats`, and `tests/test_install_hooks.bats` (full suite green).
 
 ## Deferred
 
-- **Hook dispatcher auto-install** (chain repo-local hooks + wt guardrails so a local `core.hooksPath` can't bypass wt). Only *detection* shipped (doctor WARN). Rationale: hook **scripts** live outside the `git-wt` binary (in `~/.config/git/hooks/`, currently chezmoi-managed), and auto-rewriting commit-time hook behavior is a separate, opt-in change that touches every commit — it needs explicit sign-off and belongs in the hook-install layer, not the `git-wt` binary.
 - **Symlink/setup parity for `wt adopt` / `wt move` / `wt pr`.** Bootstrap currently runs only on `wt new`. The other worktree-creating commands could grow the same step if needed.
+- **Centralizing the global hooks on `wt hook-run`.** The chezmoi-managed global hooks (`~/.config/git/hooks/`) still inline their own guard logic; they could be slimmed to call `wt hook-run` so there is a single guard implementation. Out of scope for the `git-wt` binary (those scripts live in the dotfiles layer).

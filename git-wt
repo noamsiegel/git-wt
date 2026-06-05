@@ -1890,6 +1890,8 @@ wt $WT_VERSION — worktree CLI
   wt version [--latest]        print version; --latest checks upstream
   wt upgrade                   git pull in the install dir + re-symlink
   wt plugin <sub> [args]       manage plugins; \`wt plugin --help\` for details
+  wt install-hooks [--repo <n>]   route this repo's hooks through the wt guard, then its existing hooks
+  wt uninstall-hooks [--repo <n>] restore the repo's original core.hooksPath
 
 Config: $WT_CONFIG
 Cache:  $WT_CACHE
@@ -1992,11 +1994,197 @@ Or upgrade manually by re-installing from https://github.com/noamsiegel/git-wt"
   "$0" version
 }
 
+# ---------- hook dispatcher ----------
+
+# Pure, self-contained git-hook guardrail invoked by the per-repo dispatcher
+# (`wt hook-run <hook> [args]`). Fail-OPEN: any uncertainty exits 0 so a broken
+# wt never blocks a commit/push. Runs before require_deps/require_config.
+cmd_hook_run() {
+  local hook="${1:-}"; shift || true
+  have git || exit 0
+  case "$hook" in
+    pre-commit)
+      local gd cd top repo cpath
+      gd=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 0
+      cd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+      [[ "$gd" == "$cd" ]] || exit 0   # in a worktree → allow
+      top=$(rp "$(dirname "$cd")")
+      for repo in $(cfg_repos 2>/dev/null); do
+        cpath=$(rp "$(cfg_repo_get "$repo" path 2>/dev/null)")
+        if [[ "$cpath" == "$top" ]]; then
+          printf '\n%b\n' "$(red '═══ wt: refusing to commit in canonical checkout ═══')" >&2
+          printf '  repo: %s\n  path: %s\n' "$repo" "$top" >&2
+          printf '\n  canonical is read-only — work belongs in a worktree.\n' >&2
+          printf '  fix:  wt adopt $(git rev-parse --abbrev-ref HEAD)\n' >&2
+          printf '  or:   wt new <branch>\n' >&2
+          printf '\n  emergency bypass: git commit --no-verify\n\n' >&2
+          exit 1
+        fi
+      done
+      exit 0
+      ;;
+    pre-push)
+      [[ "$(cfg_hook_enforce_branch_names 2>/dev/null)" == "true" ]] || exit 0
+      local cd top repo r cpath
+      cd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+      top=$(rp "$(dirname "$cd")")
+      repo=""
+      for r in $(cfg_repos 2>/dev/null); do
+        cpath=$(rp "$(cfg_repo_get "$r" path 2>/dev/null)")
+        [[ "$cpath" == "$top" ]] && { repo="$r"; break; }
+      done
+      [[ -n "$repo" ]] || exit 0
+      local patterns=() p branch matched fail=0 local_ref local_sha remote_ref remote_sha
+      mapfile -t patterns < <(cfg_branch_patterns "$repo" 2>/dev/null)
+      (( ${#patterns[@]} > 0 )) || exit 0
+      while read -r local_ref local_sha remote_ref remote_sha; do
+        [[ -z "$local_ref" ]] && continue
+        branch="${local_ref#refs/heads/}"
+        [[ "$local_ref" == "$branch" ]] && continue
+        [[ "$local_sha" =~ ^0+$ ]] && continue
+        matched=0
+        for p in "${patterns[@]}"; do
+          [[ -z "$p" ]] && continue
+          [[ "$branch" =~ $p ]] && { matched=1; break; }
+        done
+        if (( matched == 0 )); then
+          printf '%b: %s\n' "$(red 'wt pre-push: rejected branch name')" "$branch" >&2
+          fail=1
+        fi
+      done
+      (( fail == 0 )) || exit 1
+      exit 0
+      ;;
+    *) exit 0 ;;
+  esac
+}
+
+# Resolve a repo arg (--repo <n>) or infer from $PWD. Echoes the repo name.
+_hook_target_repo() {
+  local repo="$1"
+  if [[ -z "$repo" ]]; then
+    local ctx; ctx=$(repo_for_cwd) || die 10 "specify --repo <name> or run inside a configured repo"
+    repo="${ctx%% *}"
+  fi
+  cfg_repo_get "$repo" path >/dev/null 2>&1 || true
+  local p; p=$(cfg_repo_get "$repo" path)
+  [[ -n "$p" && "$p" != "null" ]] || die 10 "unknown repo: $repo"
+  echo "$repo"
+}
+
+# Route a repo's git hooks through the wt guard (then its existing hooks) by
+# pointing the repo's LOCAL core.hooksPath at a generated dispatcher dir. This
+# restores wt's canonical-refuse guard in repos whose local hooksPath would
+# otherwise bypass wt's global hooks (e.g. a team-managed .githooks).
+cmd_install_hooks() {
+  local repo=""
+  while (($#)); do case "$1" in --repo) repo="${2:-}"; shift ;; *) die 10 "unknown flag: $1" ;; esac; shift; done
+  repo=$(_hook_target_repo "$repo")
+  local canonical; canonical=$(cfg_repo_get "$repo" path)
+  [[ -d "$canonical/.git" || -f "$canonical/.git" ]] || die 10 "not a git repo: $canonical"
+
+  local disp="$HOME/.config/wt/repo-hooks/$repo"
+  local cur orig
+  cur=$(git_in "$canonical" config --local --get core.hooksPath 2>/dev/null || true)
+  if [[ "$cur" == "$disp" && -r "$disp/.wt-orig-hookspath" ]]; then
+    orig=$(cat "$disp/.wt-orig-hookspath")   # already installed: preserve the true original
+  else
+    orig="$cur"                               # may be empty (git default)
+  fi
+
+  local orig_dir
+  if [[ -z "$orig" ]]; then orig_dir="$canonical/.git/hooks"
+  elif [[ "$orig" = /* ]]; then orig_dir="$orig"
+  else orig_dir="$canonical/$orig"; fi
+
+  mkdir -p "$disp"
+  printf '%s' "$orig" > "$disp/.wt-orig-hookspath"
+
+  local wt_bin; wt_bin=$(command -v wt 2>/dev/null || rp "${BASH_SOURCE[0]}")
+  sed "s|__WT_BIN__|$wt_bin|g" > "$disp/_wt-dispatch" <<'DISP'
+#!/usr/bin/env bash
+# Generated by `wt install-hooks`. Runs the wt guardrail, then chains the repo's
+# original hooks (the dir core.hooksPath pointed at before install). Do not edit.
+set -e
+hook=$(basename "$0")
+here=$(cd "$(dirname "$0")" && pwd)
+WT_BIN="__WT_BIN__"
+orig=""; [[ -r "$here/.wt-orig-hookspath" ]] && orig=$(cat "$here/.wt-orig-hookspath")
+
+tmp=$(mktemp -t wt-disp.XXXXXX 2>/dev/null || true)
+if [[ -n "$tmp" ]]; then trap 'rm -f "$tmp"' EXIT; cat > "$tmp"; src="$tmp"; else src=/dev/null; fi
+
+# 1) wt guardrail — blocks the operation on a non-zero exit.
+[[ -x "$WT_BIN" ]] && "$WT_BIN" hook-run "$hook" "$@" < "$src"
+
+# 2) chain the repo's original hook for this name, if any.
+if [[ -z "$orig" ]]; then team_dir="$(git rev-parse --git-common-dir 2>/dev/null)/hooks"
+elif [[ "$orig" = /* ]]; then team_dir="$orig"
+else team_dir="$(git rev-parse --show-toplevel 2>/dev/null)/$orig"; fi
+team="$team_dir/$hook"
+if [[ -x "$team" && "$(realpath "$team" 2>/dev/null)" != "$(realpath "$0" 2>/dev/null)" ]]; then
+  exec "$team" "$@" < "$src"
+fi
+exit 0
+DISP
+  chmod +x "$disp/_wt-dispatch"
+
+  local names=(pre-commit pre-push) f n seen=" "
+  if [[ -d "$orig_dir" ]]; then
+    for f in "$orig_dir"/*; do
+      [[ -e "$f" ]] || continue
+      n=$(basename "$f")
+      [[ "$n" == *.sample || "$n" == _wt* || "$n" == .* ]] && continue
+      [[ -x "$f" ]] || continue
+      names+=("$n")
+    done
+  fi
+  for n in "${names[@]}"; do
+    [[ "$seen" == *" $n "* ]] && continue
+    seen+="$n "
+    ln -sf "_wt-dispatch" "$disp/$n"
+  done
+
+  git_in "$canonical" config --local core.hooksPath "$disp"
+  green "installed "; printf 'wt hook dispatcher for %s\n' "$repo"
+  info "$(dim "  dispatcher:    $disp")"
+  info "$(dim "  chains hooks:  ${orig:-<git default .git/hooks>}")"
+  info "$(dim "  guarded hooks: ${seen# }")"
+}
+
+# Restore a repo's original core.hooksPath and remove the wt dispatcher dir.
+cmd_uninstall_hooks() {
+  local repo=""
+  while (($#)); do case "$1" in --repo) repo="${2:-}"; shift ;; *) die 10 "unknown flag: $1" ;; esac; shift; done
+  repo=$(_hook_target_repo "$repo")
+  local canonical; canonical=$(cfg_repo_get "$repo" path)
+  local disp="$HOME/.config/wt/repo-hooks/$repo"
+  local cur; cur=$(git_in "$canonical" config --local --get core.hooksPath 2>/dev/null || true)
+  if [[ "$cur" == "$disp" ]]; then
+    local orig=""; [[ -r "$disp/.wt-orig-hookspath" ]] && orig=$(cat "$disp/.wt-orig-hookspath")
+    if [[ -n "$orig" ]]; then
+      git_in "$canonical" config --local core.hooksPath "$orig"
+    else
+      git_in "$canonical" config --local --unset core.hooksPath 2>/dev/null || true
+    fi
+    green "uninstalled "; printf 'restored core.hooksPath for %s → %s\n' "$repo" "${orig:-<git default>}"
+  else
+    warn "core.hooksPath for $repo is '${cur:-<unset>}', not the wt dispatcher; leaving git config unchanged"
+  fi
+  [[ -d "$disp" ]] && rm -rf "$disp"
+  return 0
+}
+
 # ---------- dispatch ----------
 main() {
-  require_deps
   local sub="${1:-help}"
   shift || true
+
+  # hook-run is invoked by the generated per-repo dispatcher on every commit/
+  # push. It must be fast and fail-open, so it bypasses dep/config checks.
+  if [[ "$sub" == "hook-run" ]]; then cmd_hook_run "$@"; return; fi
+
+  require_deps
 
   # Skip the require_config check for commands that don't operate on the
   # configured worktree set. Lets users run `wt --version`, `wt --help`,
@@ -2032,6 +2220,8 @@ main() {
     upgrade) cmd_upgrade "$@" ;;
     version) cmd_version "$@" ;;
     plugin) cmd_plugin "$@" ;;
+    install-hooks) cmd_install_hooks "$@" ;;
+    uninstall-hooks) cmd_uninstall_hooks "$@" ;;
     -h|--help|help) cmd_help ;;
     --version|-V) cmd_version ;;
     *) cmd_help; exit 10 ;;
