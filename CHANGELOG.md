@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.1] — install-hooks name-filter hardening
+
+### Fixed
+- `wt install-hooks` no longer creates bogus hook symlinks for non-hook entries in the original hooks dir: directories (e.g. `__pycache__`) and dotted/helper files (e.g. `run-pre-commit-hooks.py`, `*.sample`) are skipped — only real (extensionless, executable) git hook names are wired through the dispatcher.
+- `wt install-hooks` now removes stale hook symlinks from a previous install before regenerating, so shrinking a repo's hook set doesn't leave dangling dispatcher entries.
+
 ## [v0.10.0] — worktree env bootstrap, doctor health, hook dispatcher
 
 ### Added

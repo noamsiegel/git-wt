@@ -2129,12 +2129,16 @@ exit 0
 DISP
   chmod +x "$disp/_wt-dispatch"
 
+  # Drop any stale hook symlinks from a previous install before regenerating.
+  find "$disp" -maxdepth 1 -type l -delete 2>/dev/null || true
+
   local names=(pre-commit pre-push) f n seen=" "
   if [[ -d "$orig_dir" ]]; then
     for f in "$orig_dir"/*; do
       [[ -e "$f" ]] || continue
+      [[ -d "$f" ]] && continue                       # skip dirs (e.g. __pycache__)
       n=$(basename "$f")
-      [[ "$n" == *.sample || "$n" == _wt* || "$n" == .* ]] && continue
+      [[ "$n" == _wt* || "$n" == *.* ]] && continue   # skip helpers, dotfiles, *.sample, *.py, etc.
       [[ -x "$f" ]] || continue
       names+=("$n")
     done

@@ -98,3 +98,28 @@ EOF
   local disp="$HOME/.config/wt/repo-hooks/fixrepo"
   [ -L "$disp/commit-msg" ]
 }
+
+@test "install-hooks ignores directories and dotted/helper files in the orig dir" {
+  _seed_team_hooks
+  mkdir -p "$FIX/teamhooks/__pycache__"
+  : > "$FIX/teamhooks/run-pre-commit-hooks.py"; chmod +x "$FIX/teamhooks/run-pre-commit-hooks.py"
+  : > "$FIX/teamhooks/pre-commit.sample"; chmod +x "$FIX/teamhooks/pre-commit.sample"
+  wt install-hooks --repo fixrepo >/dev/null
+  local disp="$HOME/.config/wt/repo-hooks/fixrepo"
+  [ ! -e "$disp/__pycache__" ]
+  [ ! -e "$disp/run-pre-commit-hooks.py" ]
+  [ ! -e "$disp/pre-commit.sample" ]
+  [ -L "$disp/pre-commit" ]   # real hook still wired
+}
+
+@test "re-install drops stale hook symlinks when the team hook set shrinks" {
+  _seed_team_hooks
+  : > "$FIX/teamhooks/commit-msg"; chmod +x "$FIX/teamhooks/commit-msg"
+  wt install-hooks --repo fixrepo >/dev/null
+  local disp="$HOME/.config/wt/repo-hooks/fixrepo"
+  [ -L "$disp/commit-msg" ]
+  rm "$FIX/teamhooks/commit-msg"
+  wt install-hooks --repo fixrepo >/dev/null
+  [ ! -e "$disp/commit-msg" ]   # stale symlink removed
+  [ -L "$disp/pre-commit" ]     # current hooks remain
+}
