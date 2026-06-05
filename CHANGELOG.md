@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Docs
+- README: document how to keep `wt install-hooks` working in repos whose `.envrc`/direnv manages `core.hooksPath` (put the override in the user-local `.envrc-personal` that `.envrc` sources last).
+
 ## [v0.10.1] — install-hooks name-filter hardening
 
 ### Fixed

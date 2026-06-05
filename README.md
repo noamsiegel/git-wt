@@ -224,6 +224,28 @@ wt uninstall-hooks --repo monorepo
 `wt doctor` lists which repos have a local-`core.hooksPath` override, so you
 know where `install-hooks` is worth running.
 
+### When `.envrc`/direnv manages `core.hooksPath`
+
+Some repos set `core.hooksPath` from their `.envrc` (e.g. a line like
+`git config --local core.hooksPath .githooks`). direnv re-applies that on every
+load, so it **clobbers** `wt install-hooks` the next time you enter the repo.
+If the repo's `.envrc` sources a user-local file last (commonly
+`source_env .envrc-personal`), put the override there so it wins — and still
+run `wt install-hooks` once so the dispatcher dir exists and chains the team
+hooks:
+
+```bash
+wt install-hooks --repo <name>
+# in the repo's gitignored .envrc-personal (sourced after the .envrc override):
+echo 'git config --local core.hooksPath "$HOME/.config/wt/repo-hooks/<name>"' >> .envrc-personal
+direnv allow
+```
+
+Because `core.hooksPath` is shared across a repo's worktrees but `.envrc` runs
+per-directory, the guard is only as reliable as direnv's last load — entering
+the canonical checkout re-applies the override, which is what matters for the
+canonical-commit guard.
+
 ## Plugins (v0.9.0+)
 
 Plugins are stand-alone executables named `wt-<name>` installed under
