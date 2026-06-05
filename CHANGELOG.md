@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.10.8] — auto allows nested .envrc
 
 ### Changed
 - `setup_command: auto` now runs `direnv allow` on **every tracked `.envrc`** (root + nested), not just the worktree root. Fixes fresh worktrees of monorepo-shaped repos where a per-project hook (`direnv exec <subdir>`) would otherwise hit a blocked nested `.envrc`. Tracked = committed = already trusted; untracked `.envrc` are not auto-allowed, and nested dependency installs remain root-lockfile-only.
