@@ -175,7 +175,12 @@ repos:
 - `worktree_symlinks` links each listed path into the new worktree (skips files
   that already exist; warns on a missing source; refuses `..`/absolute paths).
 - `setup_command` runs once in the new worktree, best-effort (a failure warns,
-  never fails `wt new`).
+  never fails `wt new`). Set it to `auto` to detect the toolchain from lockfiles
+  at the worktree root and run the matching cache-backed installer
+  (`uv.lock`→`uv sync`, `bun.lock(b)`→`bun install`, `pnpm-lock.yaml`→`pnpm
+  install`, `yarn.lock`→`yarn install`, `package-lock.json`→`npm ci`), then
+  `direnv allow` if an `.envrc` is present. `auto` is most useful in `defaults:`
+  so every repo provisions itself with no per-repo command.
 
 See [`docs/CONFIG.md`](./docs/CONFIG.md#worktree-bootstrap) for details.
 

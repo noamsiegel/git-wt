@@ -193,6 +193,13 @@ repos:
 - Best-effort: a non-zero exit prints a warning but does not undo or fail worktree creation (consistent with the plugin-failure invariant — see CONTEXT.md).
 - Typical uses: `direnv allow`, dependency install (`yarn install`, `uv sync`), or a project bootstrap script. Prefer fast, idempotent commands.
 - It runs only on `wt new` (not `wt adopt`, `wt move`, or `wt pr`).
+- Special value `auto`: detect the toolchain from lockfiles at the worktree root and run the matching cache-backed installer, then `direnv allow` if an `.envrc` is present. Detection (each runs if its lockfile + tool are present; multiple may run for polyglot repos):
+  - `uv.lock` → `uv sync`
+  - `bun.lockb` / `bun.lock` → `bun install`
+  - `pnpm-lock.yaml` → `pnpm install`
+  - `yarn.lock` → `yarn install`
+  - `package-lock.json` → `npm ci`
+  Each step is best-effort (missing tool or failed install warns, never fails `wt new`). Heavy dependency dirs are never copied or symlinked across worktrees — the installer's global cache (uv/bun/pnpm) keeps per-worktree installs cheap. Put `setup_command: auto` in `defaults` to auto-provision every repo.
 
 Inspect whether a worktree's symlinks and dependencies are in place with
 `wt doctor --worktree <id>`.

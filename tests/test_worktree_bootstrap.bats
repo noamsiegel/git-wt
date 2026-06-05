@@ -82,3 +82,25 @@ EOF
   [[ "$output" == *"setup_command failed (exit 7)"* ]]
   [ -d "$FIX/wt_root/ABC-1-setupfail" ]
 }
+
+@test "setup_command: auto is a no-op when no lockfile/.envrc at the worktree root" {
+  _write_config "    setup_command: auto"
+  run wt new dev/ABC-1-autonoop
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-setup: nothing to do"* ]]
+}
+
+@test "setup_command: auto runs the detected installer (uv.lock → uv)" {
+  # fake uv on PATH (\$FIX/bin is first on PATH) that records its invocation
+  printf '#!/usr/bin/env bash\necho "uv %s" >> "%s/uv-calls"\n' '$*' "$FIX" > "$FIX/bin/uv"
+  chmod +x "$FIX/bin/uv"
+  # put uv.lock on origin/main so the new worktree checks it out
+  echo lock > "$FIX/canonical/uv.lock"
+  git -C "$FIX/canonical" add uv.lock
+  git -C "$FIX/canonical" commit --no-verify -q -m "add uv.lock"
+  git -C "$FIX/canonical" push -q origin main
+  _write_config "    setup_command: auto"
+  run wt new dev/ABC-1-autouv
+  [ "$status" -eq 0 ]
+  grep -q 'uv sync' "$FIX/uv-calls"
+}

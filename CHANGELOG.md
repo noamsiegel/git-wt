@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.4] — setup_command: auto toolchain detection
+
+### Added
+- `setup_command: auto` (works in `defaults` or per-repo): on `wt new`, detect the toolchain from lockfiles at the worktree root and run the matching cache-backed installer — `uv.lock`→`uv sync`, `bun.lockb`/`bun.lock`→`bun install`, `pnpm-lock.yaml`→`pnpm install`, `yarn.lock`→`yarn install`, `package-lock.json`→`npm ci` — then `direnv allow` if an `.envrc` is present. Multiple run for polyglot repos. Each step is best-effort (missing tool or failed install warns, never fails `wt new`). Removes the need to hand-write a per-repo install command.
+
 ## [v0.10.3] — install-hooks auto-handles direnv-managed hooksPath
 
 ### Added
