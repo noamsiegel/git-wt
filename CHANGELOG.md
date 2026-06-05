@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.5] — branch and worktree state seams
+
+### Changed
+- Centralized branch policy behind `branch_policy_allows`, so command-time validation and `wt hook-run pre-push` share the same quiet predicate, including maximum branch length.
+- Centralized worktree clean/pushed/reachable state behind `worktree_state_record` and `worktree_reap_refusals`, so `status`, `tidy`, and `reap` consume one safety/state surface.
+
 ## [v0.10.4] — setup_command: auto toolchain detection
 
 ### Added

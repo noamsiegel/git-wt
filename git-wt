@@ -343,22 +343,35 @@ branch_policy_match_repo() {
   return 0
 }
 
-# Validate <branch> against <repo>'s configured pattern set.
+# Return 0 if <branch> is allowed by <repo>'s configured pattern set.
 # Repos with no patterns allow all branch names after global length validation.
-branch_policy_validate() {
-  local repo="$1" branch="$2"
-  local maxlen pattern has_patterns=0
-  maxlen=$(cfg_max_branch_len)
-  if (( ${#branch} > maxlen )); then
-    die 10 "branch name >$maxlen chars: ${branch}"
-  fi
+branch_policy_branch_matches() {
+  local repo="$1" branch="$2" pattern has_patterns=0
   while IFS= read -r pattern; do
     [[ -z "$pattern" ]] && continue
     has_patterns=1
     if [[ "$branch" =~ $pattern ]]; then return 0; fi
   done < <(cfg_branch_patterns "$repo")
-  (( has_patterns == 0 )) && return 0
-  die 10 "branch '$branch' does not match any configured pattern for repo '$repo'"
+  (( has_patterns == 0 ))
+}
+
+# Return 0 if <branch> passes the full branch policy for <repo>.
+branch_policy_allows() {
+  local repo="$1" branch="$2" maxlen
+  maxlen=$(cfg_max_branch_len)
+  (( ${#branch} <= maxlen )) || return 1
+  branch_policy_branch_matches "$repo" "$branch"
+}
+
+# Validate <branch> against <repo>'s configured policy; dies with user-facing detail.
+branch_policy_validate() {
+  local repo="$1" branch="$2" maxlen
+  maxlen=$(cfg_max_branch_len)
+  if (( ${#branch} > maxlen )); then
+    die 10 "branch name >$maxlen chars: ${branch}"
+  fi
+  branch_policy_branch_matches "$repo" "$branch" \
+    || die 10 "branch '$branch' does not match any configured pattern for repo '$repo'"
 }
 
 # Emit <repo>'s branch_patterns as a quoted bash array body for hook cache.
@@ -864,6 +877,35 @@ reachable_from() {
   [[ -z "$(echo "$out" | grep '^+')" ]]
 }
 
+# Emit clean/pushed/reachable state for a worktree as:
+#   clean\tpushed\treach
+worktree_state_record() {
+  local wt="$1" default="$2" clean pushed reach
+  is_clean "$wt" && clean=yes || clean=no
+  is_pushed "$wt" && pushed=yes || pushed=no
+  reachable_from "$wt" "$default" && reach=yes || reach=no
+  printf '%s\t%s\t%s\n' "$clean" "$pushed" "$reach"
+}
+
+# Emit one refusal token per line for a conservative reap safety check.
+worktree_reap_refusals() {
+  local wt="$1" default="$2" state clean pushed reach
+  [[ -d "$wt" ]] || return 0
+  state=$(worktree_state_record "$wt" "$default")
+  wt_record_fields "$state" clean pushed reach
+  [[ "$clean" == "yes" ]] || printf '%s\n' "uncommitted-changes"
+  [[ "$pushed" == "yes" ]] || printf '%s\n' "unpushed-commits"
+  [[ "$reach" == "yes" ]] || printf '%s\n' "not-reachable-from-origin/$default"
+  if command -v lsof >/dev/null 2>&1; then
+    local lsof_out n_pids
+    lsof_out=$(lsof +D "$wt" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)
+    if [[ -n "$lsof_out" ]]; then
+      n_pids=$(echo "$lsof_out" | wc -l | tr -d ' ')
+      printf '%s\n' "files-open-by-${n_pids}-process(es)"
+    fi
+  fi
+}
+
 # ---------- subcommands ----------
 
 cmd_doctor() {
@@ -1343,10 +1385,9 @@ cmd_status() {
         [[ "$is_canonical" == "worktree" ]] || continue
         [[ -n "$branch" ]] || branch="(detached)"
         if path_under_forbidden "$_rp_path"; then branch="$branch (external)"; fi
-        local c p r
-        is_clean "$path" && c=yes || c=no
-        is_pushed "$path" && p=yes || p=no
-        reachable_from "$path" "$default_branch" && r=yes || r=no
+        local state c p r
+        state=$(worktree_state_record "$path" "$default_branch")
+        wt_record_fields "$state" c p r
         printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$c" "$p" "$r" "$branch"
       done < <(wt_each_worktree "$repo")
     } | column -t -s $'\t' | sed 's/^/  /'
@@ -1423,21 +1464,7 @@ cmd_reap() {
 
     # Safety
     local refusals=()
-    if [[ -d "$path" ]]; then
-      is_clean "$path" || refusals+=("uncommitted-changes")
-      is_pushed "$path" || refusals+=("unpushed-commits")
-      reachable_from "$path" "$default_branch" || refusals+=("not-reachable-from-origin/$default_branch")
-    fi
-    # Process-cwd / open-files check (catches OMP sub-agents, editors, watchers, dev servers).
-    # lsof +D walks the worktree tree.
-    if [[ -d "$path" ]] && command -v lsof >/dev/null 2>&1; then
-      local lsof_out
-      lsof_out=$(lsof +D "$path" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)
-      if [[ -n "$lsof_out" ]]; then
-        local n_pids; n_pids=$(echo "$lsof_out" | wc -l | tr -d ' ')
-        refusals+=("files-open-by-${n_pids}-process(es)")
-      fi
-    fi
+    mapfile -t refusals < <(worktree_reap_refusals "$path" "$default_branch")
     if (( ${#refusals[@]} > 0 && force == 0 )); then
       printf '%s %s [%s]\n' "$(red REFUSE)" "$id" "$(IFS=,; echo "${refusals[*]}")"
       (( dry == 1 )) && continue
@@ -1553,10 +1580,9 @@ cmd_tidy() {
         wt_record_fields "$record" _repo id path _rp_path branch _sha is_canonical
         [[ "$is_canonical" == "worktree" ]] || continue
         [[ -n "$branch" ]] || branch="(detached)"
-        local clean pushed reach group action
-        is_clean "$path" && clean=yes || clean=no
-        is_pushed "$path" && pushed=yes || pushed=no
-        reachable_from "$path" "$default_branch" && reach=yes || reach=no
+        local state clean pushed reach group action
+        state=$(worktree_state_record "$path" "$default_branch")
+        wt_record_fields "$state" clean pushed reach
         if [[ "$clean" == "no" ]]; then
           group="active-dirty"; action="keep; commit/stash before reap"
         elif [[ "$pushed" == "yes" && "$reach" == "yes" ]]; then
@@ -2069,23 +2095,17 @@ cmd_hook_run() {
         [[ "$cpath" == "$top" ]] && { repo="$r"; break; }
       done
       [[ -n "$repo" ]] || exit 0
-      local patterns=() p branch matched fail=0 local_ref local_sha remote_ref remote_sha
-      mapfile -t patterns < <(cfg_branch_patterns "$repo" 2>/dev/null)
-      (( ${#patterns[@]} > 0 )) || exit 0
+      local branch fail=0 local_ref local_sha remote_ref remote_sha
       while read -r local_ref local_sha remote_ref remote_sha; do
         [[ -z "$local_ref" ]] && continue
         branch="${local_ref#refs/heads/}"
         [[ "$local_ref" == "$branch" ]] && continue
         [[ "$local_sha" =~ ^0+$ ]] && continue
-        matched=0
-        for p in "${patterns[@]}"; do
-          [[ -z "$p" ]] && continue
-          [[ "$branch" =~ $p ]] && { matched=1; break; }
-        done
-        if (( matched == 0 )); then
-          printf '%b: %s\n' "$(red 'wt pre-push: rejected branch name')" "$branch" >&2
-          fail=1
+        if branch_policy_allows "$repo" "$branch"; then
+          continue
         fi
+        printf '%b: %s\n' "$(red 'wt pre-push: rejected branch name')" "$branch" >&2
+        fail=1
       done
       (( fail == 0 )) || exit 1
       exit 0

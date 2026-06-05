@@ -26,6 +26,21 @@ _source_wt() {
   [ "$output" = "" ]
 }
 
+@test "branch_policy_allows is the quiet shared policy predicate" {
+  _source_wt
+
+  run branch_policy_allows fixrepo dev/ABC-1-ok
+  [ "$status" -eq 0 ]
+
+  run branch_policy_allows fixrepo feature/nope
+  [ "$status" -eq 1 ]
+
+  yq -i '.branch_max_length = 10' "$WT_CONFIG"
+  cfg_reload
+  run branch_policy_allows fixrepo dev/ABC-1-too-long
+  [ "$status" -eq 1 ]
+}
+
 @test "branch_policy_match_repo picks first repo on ambiguous match" {
   cat > "$WT_CONFIG" <<EOF
 repos:

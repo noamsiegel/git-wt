@@ -31,6 +31,14 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "hook-run pre-push uses shared branch policy predicate" {
+  yq -i '.hooks.enforce_branch_names = true | .branch_max_length = 12' "$WT_CONFIG"
+  run bash -c "cd '$FIX/canonical' && printf '%s\n' 'refs/heads/dev/ABC-1-too-long deadbeef refs/heads/dev/ABC-1-too-long 0000000000000000000000000000000000000000' | wt hook-run pre-push"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"rejected branch name"* ]]
+  [[ "$output" == *"dev/ABC-1-too-long"* ]]
+}
+
 @test "install-hooks points local core.hooksPath at the dispatcher dir" {
   _seed_team_hooks
   run wt install-hooks --repo fixrepo

@@ -4,6 +4,10 @@ load lib/setup.bash
 setup() { wt_test_setup; }
 teardown() { wt_test_teardown; }
 
+_source_wt() {
+  source "$WT_REPO_ROOT/git-wt"
+}
+
 @test "list shows nothing under repo when no worktrees" {
   run wt list
   [ "$status" -eq 0 ]
@@ -42,6 +46,15 @@ teardown() { wt_test_teardown; }
   # rough field checks (ANSI escapes inflate columns but yes/no tokens are present)
   [[ "$output" == *"yes"* ]]
   [[ "$output" == *"no"* ]]
+}
+
+@test "worktree_state_record emits shared clean pushed reach fields" {
+  wt_quick_new dev/ABC-1-state
+  _source_wt
+
+  run worktree_state_record "$FIX/wt_root/ABC-1-state" main
+  [ "$status" -eq 0 ]
+  [ "$output" = $'yes\tno\tyes' ]
 }
 
 @test "read-only: list works from canonical" {
