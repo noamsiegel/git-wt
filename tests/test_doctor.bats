@@ -26,6 +26,10 @@ teardown() { wt_test_teardown; }
   grep -q "WT_CANONICAL_PATHS=" "$WT_CACHE"
   grep -q "$FIX/canonical" "$WT_CACHE"
   grep -q "WT_PATTERNS_fixrepo=" "$WT_CACHE"
+  ! grep -q "declare -A" "$WT_CACHE"
+  run /bin/bash -c "source '$WT_CACHE'; wt_repo_by_path '$FIX/canonical'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "fixrepo" ]
 }
 
 @test "doctor reports dirty canonical as WARN, not FAIL" {

@@ -217,7 +217,7 @@ hooks:
 - worktree roots and realpaths;
 - forbidden roots and realpaths;
 - `WT_HOOK_ENFORCE_BRANCH_NAMES`;
-- repo-by-path mapping;
+- Bash 3-compatible repo-by-path lookup arrays plus `wt_repo_by_path`;
 - per-repo branch pattern arrays.
 
 When `enforce_branch_names` is false, branch-pattern checks still run in `wt new`; push-time hook enforcement stays off.

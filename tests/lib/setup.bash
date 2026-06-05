@@ -133,7 +133,7 @@ source "$WT_CACHE" 2>/dev/null || exec_chain "$@"
 
 canonical_git=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exec_chain "$@"
 toplevel=$(dirname "$canonical_git")
-repo="${WT_REPO_BY_PATH[$toplevel]:-}"
+repo=$(wt_repo_by_path "$toplevel" 2>/dev/null || true)
 [[ -z "$repo" ]] && exec_chain "$@"
 
 gd=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exec_chain "$@"
@@ -176,7 +176,7 @@ source "$WT_CACHE" 2>/dev/null || exec_chain "$@"
 
 canonical_git=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exec_chain "$@"
 toplevel=$(dirname "$canonical_git")
-repo="${WT_REPO_BY_PATH[$toplevel]:-}"
+repo=$(wt_repo_by_path "$toplevel" 2>/dev/null || true)
 [[ -z "$repo" ]] && exec_chain "$@"
 
 [[ "${WT_HOOK_ENFORCE_BRANCH_NAMES:-false}" == "true" ]] || exec_chain "$@"
@@ -236,7 +236,7 @@ source "$WT_CACHE" 2>/dev/null || exec_chain "$@"
 
 canonical_git=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exec_chain "$@"
 toplevel=$(dirname "$canonical_git")
-repo="${WT_REPO_BY_PATH[$toplevel]:-}"
+repo=$(wt_repo_by_path "$toplevel" 2>/dev/null || true)
 [[ -z "$repo" ]] && exec_chain "$@"
 
 gd=$(git rev-parse --git-dir 2>/dev/null)

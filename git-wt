@@ -1051,14 +1051,34 @@ generate_path_cache() {
     done < <(cfg_forbidden)
     printf ')\n'
     printf 'WT_HOOK_ENFORCE_BRANCH_NAMES=%q\n' "$(cfg_hook_enforce_branch_names)"
-    echo 'declare -A WT_REPO_BY_PATH=('
+    printf 'WT_REPO_PATHS=('
     while IFS= read -r record; do
       wt_record_fields "$record" repo path wt_root _base _default _workspace
       rp_path=$(rp "$path")
-      printf '  %q %q\n' "$path" "$repo"
-      [[ "$path" != "$rp_path" ]] && printf '  %q %q\n' "$rp_path" "$repo"
+      printf "%q %q " "$path" "$rp_path"
     done < <(cfg_each_repo_record)
-    echo ')'
+    printf ')\n'
+    printf 'WT_REPO_NAMES=('
+    while IFS= read -r record; do
+      wt_record_fields "$record" repo path wt_root _base _default _workspace
+      rp_path=$(rp "$path")
+      printf "%q " "$repo"
+      [[ "$path" != "$rp_path" ]] && printf "%q " "$repo"
+    done < <(cfg_each_repo_record)
+    printf ')\n'
+    cat <<'EOF'
+wt_repo_by_path() {
+  local needle="$1" i=0
+  while [ "$i" -lt "${#WT_REPO_PATHS[@]}" ]; do
+    if [ "${WT_REPO_PATHS[$i]}" = "$needle" ]; then
+      printf '%s\n' "${WT_REPO_NAMES[$i]}"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+EOF
     while IFS= read -r record; do
       wt_record_fields "$record" repo path wt_root _base _default _workspace
       printf 'WT_PATTERNS_%s=(\n' "${repo//[^a-zA-Z0-9_]/_}"

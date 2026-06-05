@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.6] — Bash 3-compatible hook cache
+
+### Fixed
+- `wt doctor --install-hooks` now writes a Bash 3-compatible `paths.cache`, replacing the associative `WT_REPO_BY_PATH` map with parallel arrays plus `wt_repo_by_path`. This avoids `declare -A` failures when Git invokes hooks through macOS `/bin/bash`.
+
 ## [v0.10.5] — branch and worktree state seams
 
 ### Changed
