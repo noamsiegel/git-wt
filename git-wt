@@ -888,7 +888,11 @@ cmd_doctor() {
     _lhp=$(git_in "$_hcanon" config --local --get core.hooksPath 2>/dev/null || true)
     [[ -z "$_lhp" || "$_lhp" == "$HOME/.config/git/hooks" ]] && continue
     printf '%-40s' "[$_hrepo] effective hooks"
-    yellow "WARN (local override: $_lhp)\n"
+    if [[ "$_lhp" == "$HOME/.config/wt/repo-hooks/"* ]]; then
+      green "PASS (wt dispatcher)\n"
+    else
+      yellow "WARN (local override: $_lhp)\n"
+    fi
   done
 
   if (( install_hooks == 1 )); then

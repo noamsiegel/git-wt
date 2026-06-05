@@ -2,7 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.10.2] — doctor recognizes the wt dispatcher
+
+### Fixed
+- `wt doctor` no longer warns "local override" for a repo whose `core.hooksPath` points at the wt dispatcher (`~/.config/wt/repo-hooks/<repo>`); it now reports `PASS (wt dispatcher)`. Genuine third-party overrides still warn.
 
 ### Docs
 - README: document how to keep `wt install-hooks` working in repos whose `.envrc`/direnv manages `core.hooksPath` (put the override in the user-local `.envrc-personal` that `.envrc` sources last).

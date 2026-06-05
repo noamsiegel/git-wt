@@ -123,3 +123,10 @@ EOF
   [ ! -e "$disp/commit-msg" ]   # stale symlink removed
   [ -L "$disp/pre-commit" ]     # current hooks remain
 }
+
+@test "doctor reports the wt dispatcher as healthy, not a local override" {
+  _seed_team_hooks
+  wt install-hooks --repo fixrepo >/dev/null
+  run wt doctor
+  [[ "$output" == *"[fixrepo] effective hooks"*"PASS (wt dispatcher)"* ]]
+}
