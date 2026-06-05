@@ -130,3 +130,26 @@ EOF
   run wt doctor
   [[ "$output" == *"[fixrepo] effective hooks"*"PASS (wt dispatcher)"* ]]
 }
+
+@test "install-hooks writes .envrc-personal override when .envrc manages core.hooksPath" {
+  printf 'git config --local core.hooksPath .githooks\nsource_env .envrc-personal\n' > "$FIX/canonical/.envrc"
+  : > "$FIX/canonical/.envrc-personal"
+  run wt install-hooks --repo fixrepo
+  [ "$status" -eq 0 ]
+  grep -q 'repo-hooks/fixrepo' "$FIX/canonical/.envrc-personal"
+}
+
+@test "install-hooks .envrc-personal override is idempotent" {
+  printf 'git config --local core.hooksPath .githooks\nsource_env .envrc-personal\n' > "$FIX/canonical/.envrc"
+  : > "$FIX/canonical/.envrc-personal"
+  wt install-hooks --repo fixrepo >/dev/null
+  wt install-hooks --repo fixrepo >/dev/null
+  [ "$(grep -c 'repo-hooks/fixrepo' "$FIX/canonical/.envrc-personal")" -eq 1 ]
+}
+
+@test "install-hooks warns when .envrc manages hooksPath but sources no local file" {
+  printf 'git config --local core.hooksPath .githooks\n' > "$FIX/canonical/.envrc"
+  run wt install-hooks --repo fixrepo
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sources no user-local file"* ]]
+}

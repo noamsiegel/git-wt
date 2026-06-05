@@ -2158,6 +2158,26 @@ DISP
   info "$(dim "  dispatcher:    $disp")"
   info "$(dim "  chains hooks:  ${orig:-<git default .git/hooks>}")"
   info "$(dim "  guarded hooks: ${seen# }")"
+
+  # If the repo's .envrc manages core.hooksPath, direnv re-applies it on every
+  # load and would clobber the dispatcher. Persist the override in the user-local
+  # file the .envrc sources last (e.g. .envrc-personal) so it wins.
+  local envrc="$canonical/.envrc" local_src override_target
+  if [[ -f "$envrc" ]] && grep -qE 'core\.hooksPath' "$envrc"; then
+    local_src=$(grep -oE 'source_env(_if_exists)?[[:space:]]+[^[:space:]#]+' "$envrc" | tail -1 | awk '{print $NF}' | tr -d "\"'" || true)
+    if [[ -n "$local_src" ]]; then
+      override_target="$canonical/$local_src"
+      if grep -q "repo-hooks/$repo\"" "$override_target" 2>/dev/null; then
+        info "$(dim "  .envrc manages core.hooksPath → override already in $local_src")"
+      else
+        printf '\n# wt install-hooks: re-assert the wt dispatcher after .envrc sets core.hooksPath\ngit config --local core.hooksPath "%s"\n' "$disp" >> "$override_target"
+        info "$(dim "  .envrc manages core.hooksPath → wrote override to $local_src")"
+      fi
+      if have direnv; then ( cd "$canonical" && direnv allow . >/dev/null 2>&1 ) || true; fi
+    else
+      warn ".envrc sets core.hooksPath but sources no user-local file; the dispatcher may be overridden on direnv load (see README)."
+    fi
+  fi
 }
 
 # Restore a repo's original core.hooksPath and remove the wt dispatcher dir.

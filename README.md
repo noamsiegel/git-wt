@@ -228,18 +228,21 @@ know where `install-hooks` is worth running.
 
 Some repos set `core.hooksPath` from their `.envrc` (e.g. a line like
 `git config --local core.hooksPath .githooks`). direnv re-applies that on every
-load, so it **clobbers** `wt install-hooks` the next time you enter the repo.
-If the repo's `.envrc` sources a user-local file last (commonly
-`source_env .envrc-personal`), put the override there so it wins — and still
-run `wt install-hooks` once so the dispatcher dir exists and chains the team
-hooks:
+load, so it would **clobber** `wt install-hooks` the next time you enter the repo.
+
+`wt install-hooks` handles this automatically: when it sees the repo's `.envrc`
+manages `core.hooksPath` and sources a user-local file last (e.g.
+`source_env .envrc-personal`), it appends the dispatcher override to that file
+(idempotently) and runs `direnv allow`, so the override wins on every load:
 
 ```bash
 wt install-hooks --repo <name>
-# in the repo's gitignored .envrc-personal (sourced after the .envrc override):
-echo 'git config --local core.hooksPath "$HOME/.config/wt/repo-hooks/<name>"' >> .envrc-personal
-direnv allow
+#   .envrc manages core.hooksPath → wrote override to .envrc-personal
 ```
+
+If the `.envrc` manages `core.hooksPath` but sources no user-local file,
+`install-hooks` warns and you'll need to add the override wherever your `.envrc`
+can re-assert it last.
 
 Because `core.hooksPath` is shared across a repo's worktrees but `.envrc` runs
 per-directory, the guard is only as reliable as direnv's last load — entering

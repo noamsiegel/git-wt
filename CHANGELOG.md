@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.3] — install-hooks auto-handles direnv-managed hooksPath
+
+### Added
+- `wt install-hooks` now detects when a repo's `.envrc` manages `core.hooksPath` (which direnv would re-apply and clobber the dispatcher) and, if the `.envrc` sources a user-local file last (e.g. `source_env .envrc-personal`), appends the dispatcher override to that file (idempotently) and runs `direnv allow`. If no user-local source is found, it warns. Makes direnv-managed repos a one-command install.
+
 ## [v0.10.2] — doctor recognizes the wt dispatcher
 
 ### Fixed
