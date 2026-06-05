@@ -55,6 +55,7 @@ require_config() {
 _CFG_LOADED=0
 declare -gA _CFG_REPO_FIELDS=()
 declare -gA _CFG_PATTERNS=()
+declare -gA _CFG_SYMLINKS=()
 _CFG_REPOS_LIST=""
 _CFG_FORBIDDEN_LIST=""
 _CFG_MAX_LEN=80
@@ -73,6 +74,9 @@ _cfg_load() {
       defaults.branch_patterns.*)
         _CFG_PATTERNS[__defaults__]+="$value"$'\n'
         ;;
+      defaults.worktree_symlinks.*)
+        _CFG_SYMLINKS[__defaults__]+="$value"$'\n'
+        ;;
       defaults.*)
         field="${key#defaults.}"
         _CFG_REPO_FIELDS["__defaults__.$field"]="$value"
@@ -84,6 +88,11 @@ _cfg_load() {
         repo="${key#repos.}"; repo="${repo%%.*}"
         _CFG_PATTERNS[$repo]+="$value"$'\n'
         # First sighting of this repo (order-preserving)?
+        [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+        ;;
+      repos.*.worktree_symlinks.*)
+        repo="${key#repos.}"; repo="${repo%%.*}"
+        _CFG_SYMLINKS[$repo]+="$value"$'\n'
         [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
         ;;
       repos.*.*)
@@ -153,12 +162,30 @@ cfg_branch_patterns() {
   [[ -z "$patterns" ]] && patterns="${_CFG_PATTERNS[__defaults__]:-}"
   printf '%s' "$patterns"
 }
+cfg_worktree_symlinks() {
+  _cfg_load
+  local links="${_CFG_SYMLINKS[$1]:-}"
+  [[ -z "$links" ]] && links="${_CFG_SYMLINKS[__defaults__]:-}"
+  printf '%s' "$links"
+}
 cfg_forbidden() { _cfg_load; printf '%s' "$_CFG_FORBIDDEN_LIST"; }
 cfg_max_branch_len() { _cfg_load; echo "$_CFG_MAX_LEN"; }
 cfg_hook_enforce_branch_names() { _cfg_load; echo "$_CFG_HOOK_ENFORCE_BRANCH_NAMES"; }
 
 # Realpath of a path; never fails (returns input on miss).
 rp() { realpath "$1" 2>/dev/null || echo "$1"; }
+
+# 0 if <path> is at or under any configured forbidden root (e.g. OMP isolation).
+path_under_forbidden() {
+  local rp_probe forbidden rp_forbidden
+  rp_probe=$(rp "$1")
+  while IFS= read -r forbidden; do
+    [[ -z "$forbidden" ]] && continue
+    rp_forbidden=$(rp "$forbidden")
+    [[ "$rp_probe" == "$rp_forbidden" || "$rp_probe" == "$rp_forbidden"/* ]] && return 0
+  done < <(cfg_forbidden)
+  return 1
+}
 
 # ---------- forbidden-root check (UNCONDITIONAL; every command) ----------
 guard_forbidden() {
@@ -741,6 +768,48 @@ copy_worktreeinclude_files() {
   fi
 }
 
+# Symlink configured worktree_symlinks (gitignored env/config files) from the
+# canonical checkout into a new worktree. Live coupling, unlike .worktreeinclude
+# (which copies). Never clobbers existing files; warns (never fails) on a missing
+# source; refuses path-escape entries.
+link_worktree_symlinks() {
+  local repo="$1" canonical="$2" target="$3" relpath src dst count=0
+  while IFS= read -r relpath; do
+    [[ -z "$relpath" ]] && continue
+    if [[ "$relpath" == /* || "$relpath" == *..* ]]; then
+      warn "worktree_symlinks: refusing unsafe path: $relpath"
+      continue
+    fi
+    src="$canonical/$relpath"
+    dst="$target/$relpath"
+    [[ -e "$dst" || -L "$dst" ]] && continue
+    if [[ ! -e "$src" ]]; then
+      warn "worktree_symlinks: source missing, skipped: $relpath"
+      continue
+    fi
+    mkdir -p "$(dirname "$dst")"
+    if ln -s "$src" "$dst" 2>/dev/null; then
+      count=$((count + 1))
+    else
+      warn "worktree_symlinks: failed to link: $relpath"
+    fi
+  done < <(cfg_worktree_symlinks "$repo")
+  if (( count > 0 )); then info "$(dim "→ linked $count file(s) into worktree")"; fi
+  return 0
+}
+
+# Run a configured per-repo setup_command inside a freshly created worktree.
+# Best-effort: a non-zero exit warns but never undoes worktree creation.
+run_setup_command() {
+  local repo="$1" target="$2" cmd rc=0
+  cmd=$(cfg_repo_get "$repo" setup_command)
+  [[ -z "$cmd" || "$cmd" == "null" ]] && return 0
+  info "$(dim "→ running setup_command in $target")"
+  ( cd "$target" && bash -c "$cmd" ) || rc=$?
+  if (( rc != 0 )); then warn "setup_command failed (exit $rc); worktree left in place"; fi
+  return 0
+}
+
 is_clean() {
   local wt="$1"
   [[ -z "$(git_in "$wt" status --porcelain 2>/dev/null)" ]]
@@ -767,14 +836,17 @@ reachable_from() {
 # ---------- subcommands ----------
 
 cmd_doctor() {
-  local install_hooks=0 fail=0
+  local install_hooks=0 fail=0 wt_id=""
   while (($#)); do
     case "$1" in
       --install-hooks) install_hooks=1 ;;
+      --worktree) wt_id="${2:-}"; shift ;;
       *) die 10 "unknown flag: $1" ;;
     esac
     shift
   done
+
+  if [[ -n "$wt_id" ]]; then cmd_doctor_worktree "$wt_id"; return $?; fi
 
   printf '%-40s' "bash >= 4"; if (( BASH_VERSINFO[0] >= 4 )); then green "PASS\n"; else red "FAIL\n"; fail=1; fi
   printf '%-40s' "yq (mikefarah/yq)"; if "$WT_YQ_BIN" --version 2>&1 | grep -q mikefarah; then green "PASS\n"; else red "FAIL\n"; fail=1; fi
@@ -789,26 +861,35 @@ cmd_doctor() {
     printf '%-40s' "[$repo] canonical on $default"
     local cur
     cur=$(git_in "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
-    if [[ "$cur" == "$default" ]]; then green "PASS\n"; else yellow "WARN ($cur)\n"; fi
+    if [[ "$cur" == "$default" ]]; then green "PASS\n"; else red "FAIL ($cur)\n"; fail=1; fi
     printf '%-40s' "[$repo] canonical clean"
     if is_clean "$path"; then green "PASS\n"; else yellow "WARN (dirty)\n"; fi
   done < <(cfg_each_repo_record)
 
   printf '%-40s' "no worktrees under forbidden_roots"
-  local bad=0 record _repo _path wt_root _base _default _workspace
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
+  local ext=0 record _repo _wid r_path r_rp_path _branch _sha _is_canonical repo2
+  for repo2 in $(cfg_repos); do
     while IFS= read -r record; do
-      wt_record_fields "$record" _repo _path wt_root _base _default _workspace
-      if [[ "$(rp "$wt_root")" == "$f"/* ]]; then bad=1; break 2; fi
-    done < <(cfg_each_repo_record)
-  done < <(cfg_forbidden)
-  if (( bad == 0 )); then green "PASS\n"; else red "FAIL\n"; fail=1; fi
+      wt_record_fields "$record" _repo _wid r_path r_rp_path _branch _sha _is_canonical
+      [[ "$_is_canonical" == "worktree" ]] || continue
+      if path_under_forbidden "$r_rp_path"; then ext=$((ext + 1)); fi
+    done < <(wt_each_worktree "$repo2")
+  done
+  if (( ext == 0 )); then green "PASS\n"; else yellow "WARN (external: $ext)\n"; fi
 
   printf '%-40s' "core.hooksPath set"
   local hp
   hp=$(git config --global core.hooksPath 2>/dev/null || echo "")
   if [[ "$hp" == "$HOME/.config/git/hooks" ]]; then green "PASS\n"; else yellow "WARN (not set)\n"; fi
+
+  local _hrepo _hcanon _lhp
+  for _hrepo in $(cfg_repos); do
+    _hcanon=$(cfg_repo_get "$_hrepo" path)
+    _lhp=$(git_in "$_hcanon" config --local --get core.hooksPath 2>/dev/null || true)
+    [[ -z "$_lhp" || "$_lhp" == "$HOME/.config/git/hooks" ]] && continue
+    printf '%-40s' "[$_hrepo] effective hooks"
+    yellow "WARN (local override: $_lhp)\n"
+  done
 
   if (( install_hooks == 1 )); then
     generate_path_cache
@@ -816,6 +897,54 @@ cmd_doctor() {
   fi
 
   (( fail == 0 )) || exit 1
+}
+
+# Read-only per-worktree health report: wt doctor --worktree <id>.
+cmd_doctor_worktree() {
+  local id="$1" record repo wt _id r_rp_path _branch _sha _is_canonical canonical
+  record=$(wt_resolve_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  wt_record_fields "$record" repo _id wt r_rp_path _branch _sha _is_canonical
+  canonical=$(cfg_repo_get "$repo" path)
+  printf '%s\n' "$(green "[$repo] worktree $id") $wt"
+
+  local links_any=0 relpath
+  while IFS= read -r relpath; do
+    [[ -z "$relpath" ]] && continue
+    links_any=1
+    printf '%-40s' "symlink $relpath"
+    if [[ -e "$wt/$relpath" ]]; then green "PASS\n"; else yellow "WARN (missing/dangling)\n"; fi
+  done < <(cfg_worktree_symlinks "$repo")
+  if (( links_any == 0 )); then printf '%-40s' "worktree_symlinks"; dim "INFO (none configured)\n"; fi
+
+  printf '%-40s' "node_modules"
+  if [[ -f "$wt/package.json" ]]; then
+    if [[ -d "$wt/node_modules" ]]; then green "PASS\n"; else yellow "WARN (missing; run install)\n"; fi
+  else
+    dim "INFO (no root package.json)\n"
+  fi
+
+  printf '%-40s' ".venv"
+  if [[ -d "$wt/.venv" ]]; then green "PASS\n"; else dim "INFO (absent)\n"; fi
+
+  printf '%-40s' "direnv .envrc"
+  if [[ -e "$wt/.envrc" ]]; then
+    if have direnv; then green "PASS (.envrc present)\n"; else yellow "WARN (.envrc present, direnv missing)\n"; fi
+  else
+    dim "INFO (no .envrc)\n"
+  fi
+
+  printf '%-40s' "effective core.hooksPath"
+  local hp; hp=$(git_in "$wt" config core.hooksPath 2>/dev/null || true)
+  [[ -z "$hp" ]] && hp="(unset)"
+  dim "INFO ($hp)\n"
+
+  printf '%-40s' "prunable worktree metadata"
+  if git_in "$canonical" worktree list --porcelain 2>/dev/null | grep -q '^prunable '; then
+    yellow "WARN (run: git worktree prune)\n"
+  else
+    green "PASS\n"
+  fi
+  return 0
 }
 
 generate_path_cache() {
@@ -921,6 +1050,8 @@ cmd_new() {
   # into the new worktree. Compatible with Claude Code and VS Code's convention.
   # Only gitignored files are copied — tracked files are never duplicated.
   copy_worktreeinclude_files "$canonical" "$target"
+  link_worktree_symlinks "$repo" "$canonical" "$target"
+  run_setup_command "$repo" "$target"
 
 
   green "created "
@@ -1140,7 +1271,6 @@ cmd_pr() {
 }
 
 cmd_list() {
-  guard_not_canonical
   local repo
   for repo in $(cfg_repos); do
     local canonical wt_root
@@ -1153,6 +1283,7 @@ cmd_list() {
         wt_record_fields "$record" _repo id path _rp_path branch sha is_canonical
         [[ "$is_canonical" == "worktree" ]] || continue
         [[ -n "$branch" ]] || branch="(detached)"
+        if path_under_forbidden "$_rp_path"; then branch="$branch (external)"; fi
         printf '%s\t%s\t%s\n' "$id" "$sha" "$branch"
       done < <(wt_each_worktree "$repo")
     } | column -t -s $'\t' | sed '1 s/^/  /; 2,$ s/^/  /'
@@ -1160,7 +1291,6 @@ cmd_list() {
 }
 
 cmd_status() {
-  guard_not_canonical
   local refresh=0
   while (($#)); do case "$1" in --refresh) refresh=1; shift;; *) die 10 "unknown flag: $1";; esac; done
   local repo
@@ -1177,6 +1307,7 @@ cmd_status() {
         wt_record_fields "$record" _repo id path _rp_path branch _sha is_canonical
         [[ "$is_canonical" == "worktree" ]] || continue
         [[ -n "$branch" ]] || branch="(detached)"
+        if path_under_forbidden "$_rp_path"; then branch="$branch (external)"; fi
         local c p r
         is_clean "$path" && c=yes || c=no
         is_pushed "$path" && p=yes || p=no
@@ -1310,12 +1441,12 @@ cmd_reap() {
 }
 
 cmd_cd() {
-  guard_not_canonical
   local id="${1:-}"
   [[ -n "$id" ]] || die 10 "usage: wt cd <id>"
   local record repo path _id _rp_path _branch _sha _is_canonical
   record=$(wt_resolve_id "$id") || die 20 "no worktree '$id' in any configured repo"
   wt_record_fields "$record" repo _id path _rp_path _branch _sha _is_canonical
+  if path_under_forbidden "$(rp "$path")"; then warn "external (OMP-managed) worktree: $path"; fi
   echo "$path"
 }
 

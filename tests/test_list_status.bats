@@ -44,16 +44,26 @@ teardown() { wt_test_teardown; }
   [[ "$output" == *"no"* ]]
 }
 
-@test "cwd lock: list refused from canonical" {
+@test "read-only: list works from canonical" {
   cd "$FIX/canonical"
   run wt list
-  [ "$status" -eq 20 ]
+  [ "$status" -eq 0 ]
 }
 
-@test "cwd lock: status refused from canonical" {
+@test "read-only: status works from canonical" {
   cd "$FIX/canonical"
   run wt status
-  [ "$status" -eq 20 ]
+  [ "$status" -eq 0 ]
+}
+
+@test "external worktree is labeled in list and status" {
+  git -C "$FIX/canonical" worktree add "$FIX/omp-wt-forbidden/ext-1" -b dev/ABC-1-ext >/dev/null 2>&1
+  run wt list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ext-1"*"(external)"* ]]
+  run wt status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ext-1"*"(external)"* ]]
 }
 
 @test "cwd lock: new ALLOWED from canonical (new/reap/doctor are exempted)" {

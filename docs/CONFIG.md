@@ -83,6 +83,8 @@ Defaults are inherited by every repo unless the repo overrides the field.
 | `herdr_workspace` | string | none | no | Legacy/reference tab workspace value exposed in config records. Plugins may use their own config instead. Supports `{repo}` interpolation. |
 | `branch_patterns` | string array | empty | no | Bash extended regular expressions accepted for branch names. Repos with no patterns allow any branch name that passes length validation. |
 | `protected_refs` | string array | empty | no | Exact names or regexes consumed by the guardrails personal hook layer when running in a wt-managed repo. git-wt core stores this in config but does not enforce protected refs itself. |
+| `worktree_symlinks` | string array | empty | no | Repo-relative paths symlinked from the canonical checkout into each new worktree by `wt new`. Repo list replaces defaults (no merge). See Worktree bootstrap. |
+| `setup_command` | string | none | no | Shell command run (`bash -c`) inside each new worktree after creation. Best-effort: failure warns, never fails `wt new`. See Worktree bootstrap. |
 
 ## `repos.<name>` fields
 
@@ -97,6 +99,8 @@ Each entry under `repos:` declares one canonical checkout.
 | `herdr_workspace` | string | no | yes | Workspace name retained for tab-plugin compatibility and config records. |
 | `branch_patterns` | string array | no | yes | Repo-specific branch regexes. If present, they replace default patterns for this repo. |
 | `protected_refs` | string array | no | yes | Guardrails hook policy input for protected branches. |
+| `worktree_symlinks` | string array | no | yes (replaces) | Repo-relative paths to symlink into new worktrees. If present, replaces the default list. |
+| `setup_command` | string | no | yes | Per-repo bootstrap command run in new worktrees. |
 
 Repo keys should be stable and shell-friendly: lowercase letters, digits, `_`, and `-` are safest. `wt onboard` sanitizes proposed names by lowercasing and replacing unsupported characters with `-`.
 
@@ -148,6 +152,50 @@ forbidden_roots:
 `guard_forbidden` resolves the current directory and target paths with `realpath` where possible. If a path is equal to or nested under a forbidden root, wt exits with guardrail code 20.
 
 Use this to keep git-wt from creating or operating in directory trees owned by other isolation systems.
+
+## Worktree bootstrap
+
+`wt new` can seed a fresh worktree with gitignored env files and run a setup
+command, so new worktrees are usable without manual copying or re-installing
+dependencies.
+
+```yaml
+defaults:
+  # Symlink these gitignored files from the canonical checkout into each new
+  # worktree (live coupling; the worktree shares the canonical's copy).
+  worktree_symlinks:
+    - .env.local
+    - .envrc-personal
+  # Run after creation, with cwd = the new worktree. Best-effort.
+  setup_command: "direnv allow"
+
+repos:
+  my-repo:
+    worktree_symlinks:
+      - .env
+    setup_command: "direnv allow && yarn install"
+```
+
+### `worktree_symlinks`
+
+- Each entry is a path relative to the repo root.
+- On `wt new`, git-wt creates `worktree/<path>` as a symlink to `canonical/<path>`.
+- Never clobbers: if `worktree/<path>` already exists (tracked, or copied via `.worktreeinclude`), the entry is skipped.
+- Missing source: if `canonical/<path>` does not exist, git-wt warns and continues — `wt new` still succeeds.
+- Path-escape entries (absolute, or containing `..`) are refused with a warning.
+- Repo-level `worktree_symlinks` replaces the defaults list (no merge), mirroring `branch_patterns`.
+- Contrast with `.worktreeinclude`, which *copies* gitignored files into the worktree. `worktree_symlinks` *links* them — use it for files you want kept in a single source of truth; use `.worktreeinclude` for files each worktree should own independently.
+- Security: only the exact paths you list are linked. Never use it to bulk-link a directory of secrets you do not intend to expose in every worktree.
+
+### `setup_command`
+
+- A single shell string, run as `bash -c "<command>"` with the working directory set to the new worktree, after symlinks are created.
+- Best-effort: a non-zero exit prints a warning but does not undo or fail worktree creation (consistent with the plugin-failure invariant — see CONTEXT.md).
+- Typical uses: `direnv allow`, dependency install (`yarn install`, `uv sync`), or a project bootstrap script. Prefer fast, idempotent commands.
+- It runs only on `wt new` (not `wt adopt`, `wt move`, or `wt pr`).
+
+Inspect whether a worktree's symlinks and dependencies are in place with
+`wt doctor --worktree <id>`.
 
 ## Hooks
 

@@ -83,11 +83,13 @@ Then bootstrap with `wt init` to install global git hooks at
 ```bash
 wt new noam/AUTH-123-add-sso     # new worktree off origin/main
 wt list                           # all active worktrees
+wt status                         # clean/pushed/reachable per worktree (read-only)
 wt cd AUTH-123                    # print absolute worktree path
 wt adopt feature/wip              # move an existing branch into a worktree
 wt move noam/AUTH-123-add-sso    # relocate uncommitted canonical work to a new worktree
 wt reap AUTH-123                  # clean up worktree, remove branch
 wt doctor                         # diagnose setup, dependencies, hook wiring
+wt doctor --worktree AUTH-123     # per-worktree health: env symlinks, deps, hooks, prunable
 wt upgrade                        # git pull in the install dir
 wt version --latest               # check upstream for updates
 ```
@@ -128,6 +130,11 @@ This composes cleanly with existing per-repo hook systems (Husky, lefthook,
 pre-commit framework, custom orchestrators) without needing to know about
 them.
 
+> **Note:** a repo that sets a *local* `core.hooksPath` (e.g. a team-managed
+> `.githooks` directory) overrides wt's global hooks and bypasses wt's
+> guardrails for that repo. `wt doctor` detects and warns about this; it does
+> not rewrite your hook configuration.
+
 ## Copying gitignored files into worktrees (`.worktreeinclude`)
 
 `wt new` copies gitignored files matching patterns in `<canonical>/.worktreeinclude`
@@ -147,6 +154,41 @@ Example `.worktreeinclude`:
 ```
 
 Patterns support `*`, `?`, `**`. Comments start with `#`.
+
+## Worktree bootstrap (`worktree_symlinks`, `setup_command`)
+
+Beyond copying (`.worktreeinclude`), `wt new` can **symlink** gitignored files
+and run a **setup command** so a fresh worktree is immediately usable:
+
+```yaml
+repos:
+  my-monorepo:
+    worktree_symlinks:        # live-linked from the canonical checkout
+      - .env.local
+    setup_command: "direnv allow && yarn install"
+```
+
+- `worktree_symlinks` links each listed path into the new worktree (skips files
+  that already exist; warns on a missing source; refuses `..`/absolute paths).
+- `setup_command` runs once in the new worktree, best-effort (a failure warns,
+  never fails `wt new`).
+
+See [`docs/CONFIG.md`](./docs/CONFIG.md#worktree-bootstrap) for details.
+
+## Inspecting worktree health
+
+- `wt doctor --worktree <id>` reports per-worktree health: configured
+  `worktree_symlinks` present/dangling, `node_modules` when a root
+  `package.json` exists, `.venv`, direnv `.envrc`, the effective
+  `core.hooksPath`, and prunable worktree metadata.
+- `wt doctor` flags any registered worktree living under a `forbidden_roots`
+  path as `WARN (external: N)` — e.g. worktrees created by an agent isolation
+  system. It stays a warning, not a hard failure.
+- A canonical checkout parked off its `default_branch` is a `doctor` failure
+  (a dirty canonical stays a warning).
+- `wt list`, `wt status`, and `wt cd` are read-only and work from inside a
+  canonical checkout. External (forbidden-root) worktrees are marked
+  `(external)` in `list`/`status`; `wt cd` to one prints the path but warns.
 
 ## Plugins (v0.9.0+)
 

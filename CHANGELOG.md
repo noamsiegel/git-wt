@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `worktree_symlinks` config (per-repo + `defaults`): on `wt new`, symlinks listed gitignored paths from the canonical checkout into the new worktree (live coupling, vs `.worktreeinclude` which copies). Skips files that already exist, warns on a missing source, refuses `..`/absolute path-escape entries. A repo list replaces the defaults list (no merge).
+- `setup_command` config (per-repo + `defaults`): runs `bash -c "<cmd>"` in a freshly created worktree after symlinks. Best-effort — a non-zero exit warns but never fails or undoes `wt new`. Runs only on `wt new`.
+- `wt doctor --worktree <id>`: read-only per-worktree health report (configured `worktree_symlinks` present/dangling, `node_modules` when a root `package.json` exists, `.venv`, direnv `.envrc`, effective `core.hooksPath`, and prunable worktree metadata).
+- `wt doctor` now flags any registered worktree under a `forbidden_roots` path as `WARN (external: N)` (e.g. agent-isolation worktrees), and warns per repo when a local `core.hooksPath` overrides wt's global hooks (detection only — wt does not rewrite hook config).
+
+### Changed
+- `wt list`, `wt status`, and `wt cd` are now read-only-safe from inside a canonical checkout (previously refused with exit 20). External (forbidden-root) worktrees are labeled `(external)` in `list`/`status`; `wt cd` to one prints the path but warns on stderr. Mutating commands still refuse from canonical.
+- `wt doctor` now treats a canonical checkout parked off its `default_branch` as a FAIL (exit 1) instead of a warning. A dirty canonical remains a warning.
+
+### Fixed
+- `wt doctor`'s forbidden-root check now enumerates actual registered worktrees (via `git worktree list`) instead of only comparing configured `worktree_root` paths, so externally-created worktrees under a forbidden root are detected.
+
 ## [0.9.7] — version --latest crash fix
 
 ### Fixed

@@ -20,6 +20,14 @@ defaults:
     - main
     - master
     - "^release/.*$"
+  # Symlink these gitignored files from the canonical checkout into each new
+  # worktree (live coupling). Repo-level lists replace this default list.
+  # worktree_symlinks:
+  #   - .env.local
+  #   - .envrc-personal
+  # Command run with cwd = the new worktree, after symlinks. Best-effort:
+  # a non-zero exit warns but never fails `wt new`. Only runs on `wt new`.
+  # setup_command: "direnv allow"
 
 hooks:
   # Whether `wt pre-push` enforces branch_patterns. Opt-in.
@@ -34,6 +42,9 @@ repos:
 
   example-service:
     path: ~/code/example-service
+    # worktree_symlinks:
+    #   - .env
+    # setup_command: "direnv allow && yarn install"
 
 # Paths under which wt refuses to operate (e.g. sub-agent isolation namespaces
 # managed by another tool). wt will never create a worktree under these.

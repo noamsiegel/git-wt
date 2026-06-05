@@ -35,11 +35,11 @@ teardown() { wt_test_teardown; }
   [[ "$output" == *"[fixrepo] canonical clean"*"WARN"* ]]
 }
 
-@test "doctor reports off-default-branch as WARN" {
+@test "doctor reports off-default-branch as FAIL" {
   git -C "$FIX/canonical" switch --quiet -c feature/foo
   run wt doctor
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"[fixrepo] canonical on main"*"WARN"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"[fixrepo] canonical on main"*"FAIL"* ]]
 }
 
 
@@ -48,4 +48,32 @@ teardown() { wt_test_teardown; }
   run wt doctor
   [ "$status" -eq 30 ]
   [[ "$output" == *"config not readable"* ]]
+}
+
+@test "doctor flags registered worktree under forbidden root as external WARN" {
+  git -C "$FIX/canonical" worktree add "$FIX/omp-wt-forbidden/ext-1" -b dev/ABC-1-ext >/dev/null 2>&1
+  run wt doctor
+  [ "$status" -eq 0 ]   # external is a WARN, not a hard fail
+  [[ "$output" == *"no worktrees under forbidden_roots"*"WARN (external: 1)"* ]]
+}
+
+@test "doctor --worktree reports per-worktree health (exit 0)" {
+  wt_quick_new dev/ABC-1-health
+  run wt doctor --worktree ABC-1-health
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"worktree ABC-1-health"* ]]
+  [[ "$output" == *"node_modules"* ]]
+  [[ "$output" == *"effective core.hooksPath"* ]]
+  [[ "$output" == *"prunable worktree metadata"* ]]
+}
+
+@test "doctor --worktree unknown id exits 20" {
+  run wt doctor --worktree nope
+  [ "$status" -eq 20 ]
+}
+
+@test "doctor warns when a repo's local core.hooksPath overrides wt hooks" {
+  git -C "$FIX/canonical" config core.hooksPath /tmp/some-other-hooks
+  run wt doctor
+  [[ "$output" == *"[fixrepo] effective hooks"*"WARN (local override: /tmp/some-other-hooks)"* ]]
 }
