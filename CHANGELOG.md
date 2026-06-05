@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.10.0] — worktree env bootstrap, doctor health, hook dispatcher
 
 ### Added
 - `worktree_symlinks` config (per-repo + `defaults`): on `wt new`, symlinks listed gitignored paths from the canonical checkout into the new worktree (live coupling, vs `.worktreeinclude` which copies). Skips files that already exist, warns on a missing source, refuses `..`/absolute path-escape entries. A repo list replaces the defaults list (no merge).
