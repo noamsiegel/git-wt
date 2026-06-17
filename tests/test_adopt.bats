@@ -82,3 +82,30 @@ teardown() { wt_test_teardown; }
   [ "$status" -eq 20 ]
   [[ "$output" == *"requires canonical to be on"* ]]
 }
+
+@test "adopt: rejects duplicate issue key creating worktree" {
+  yq -i '.repos.fixrepo.branch_issue_key_regex = "dev/(ABC-[0-9]+)-[a-z0-9-]+$" | .repos.fixrepo.enforce_unique_issue_keys = true' "$WT_CONFIG"
+  wt new dev/ABC-2-first >/dev/null
+  cd "$FIX/canonical"
+  git switch --quiet -c dev/ABC-2-second
+  git commit --no-verify --quiet --allow-empty -m "feature work"
+  git switch --quiet main
+
+  run wt adopt dev/ABC-2-second
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"branch issue key 'ABC-2' already has worktree branch 'dev/ABC-2-first'"* ]]
+  [ ! -d "$FIX/wt_root/ABC-2-second" ]
+}
+
+@test "adopt: opt-out allows intentional duplicate issue key branch" {
+  yq -i '.repos.fixrepo.branch_issue_key_regex = "dev/(ABC-[0-9]+)-[a-z0-9-]+$" | .repos.fixrepo.enforce_unique_issue_keys = true' "$WT_CONFIG"
+  wt new dev/ABC-3-first >/dev/null
+  cd "$FIX/canonical"
+  git switch --quiet -c dev/ABC-3-second
+  git commit --no-verify --quiet --allow-empty -m "feature work"
+  git switch --quiet main
+
+  run wt adopt dev/ABC-3-second --allow-duplicate-issue-key
+  [ "$status" -eq 0 ]
+  [ -d "$FIX/wt_root/ABC-3-second" ]
+}

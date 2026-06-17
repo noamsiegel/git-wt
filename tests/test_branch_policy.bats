@@ -203,3 +203,59 @@ EOF
   [ "$cache_pattern" = '^q3/[A-Z]+-[0-9]+$' ]
   [ "$runtime_pattern" = "$cache_pattern" ]
 }
+
+@test "wt new rejects duplicate issue key with different branch slug" {
+  yq -i '.repos.fixrepo.branch_issue_key_regex = "dev/(ABC-[0-9]+)-[a-z0-9-]+$" | .repos.fixrepo.enforce_unique_issue_keys = true' "$WT_CONFIG"
+
+  run wt new dev/ABC-123-first
+  [ "$status" -eq 0 ]
+
+  run wt new dev/ABC-123-second
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"branch issue key 'ABC-123' already has worktree branch 'dev/ABC-123-first'"* ]]
+  [[ "$output" == *"--allow-duplicate-issue-key"* ]]
+  [ ! -d "$FIX/wt_root/ABC-123-second" ]
+}
+
+@test "wt new opt-out allows intentional duplicate issue key branch" {
+  yq -i '.repos.fixrepo.branch_issue_key_regex = "dev/(ABC-[0-9]+)-[a-z0-9-]+$" | .repos.fixrepo.enforce_unique_issue_keys = true' "$WT_CONFIG"
+
+  run wt new dev/ABC-124-first
+  [ "$status" -eq 0 ]
+
+  run wt new --allow-duplicate-issue-key dev/ABC-124-second
+  [ "$status" -eq 0 ]
+  [ -d "$FIX/wt_root/ABC-124-second" ]
+}
+@test "wt move rejects duplicate issue key before creating worktree" {
+  yq -i '.repos.fixrepo.branch_issue_key_regex = "dev/(ABC-[0-9]+)-[a-z0-9-]+$" | .repos.fixrepo.enforce_unique_issue_keys = true' "$WT_CONFIG"
+  wt new dev/ABC-126-first >/dev/null
+  printf 'dirty\n' > "$FIX/canonical/move.txt"
+
+  run bash -c 'cd "$1" && wt move "$2"' _ "$FIX/canonical" dev/ABC-126-second
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"branch issue key 'ABC-126' already has worktree branch 'dev/ABC-126-first'"* ]]
+  [ ! -d "$FIX/wt_root/ABC-126-second" ]
+}
+
+@test "wt move opt-out allows intentional duplicate issue key branch" {
+  yq -i '.repos.fixrepo.branch_issue_key_regex = "dev/(ABC-[0-9]+)-[a-z0-9-]+$" | .repos.fixrepo.enforce_unique_issue_keys = true' "$WT_CONFIG"
+  wt new dev/ABC-127-first >/dev/null
+  printf 'dirty\n' > "$FIX/canonical/move-opt-out.txt"
+
+  run bash -c 'cd "$1" && wt move --allow-duplicate-issue-key "$2"' _ "$FIX/canonical" dev/ABC-127-second
+  [ "$status" -eq 0 ]
+  [ -d "$FIX/wt_root/ABC-127-second" ]
+}
+
+
+@test "wt new preserves old behavior when issue-key regex is unset" {
+  yq -i '.repos.fixrepo.enforce_unique_issue_keys = true' "$WT_CONFIG"
+
+  run wt new dev/ABC-125-first
+  [ "$status" -eq 0 ]
+
+  run wt new dev/ABC-125-second
+  [ "$status" -eq 0 ]
+  [ -d "$FIX/wt_root/ABC-125-second" ]
+}

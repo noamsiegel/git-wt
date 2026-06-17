@@ -43,6 +43,8 @@ repos:
     herdr_workspace: code
     branch_patterns:
       - "^yourname/[A-Z]+-[0-9]+-[a-z0-9-]+$"
+  branch_issue_key_regex: "^[^/]+/([A-Z]+-[0-9]+)-"
+  enforce_unique_issue_keys: true
 
 forbidden_roots: []
 branch_max_length: 80
@@ -82,6 +84,8 @@ Defaults are inherited by every repo unless the repo overrides the field.
 | `default_branch` | branch name | none | yes, via default or repo | Branch canonical checkout should be parked on, and branch used for reachability checks. |
 | `herdr_workspace` | string | none | no | Legacy/reference tab workspace value exposed in config records. Plugins may use their own config instead. Supports `{repo}` interpolation. |
 | `branch_patterns` | string array | empty | no | Bash extended regular expressions accepted for branch names. Repos with no patterns allow any branch name that passes length validation. |
+| `branch_issue_key_regex` | Bash ERE string | empty | no | Optional issue-key extractor used by `wt new`, `wt move`, and `wt adopt`. If unset, the duplicate issue-key guard is disabled. The first capture group is the key; without a group, the whole match is the key. |
+| `enforce_unique_issue_keys` | boolean-ish string | unset/false | no | When true and `branch_issue_key_regex` extracts a key, reject creating/adopting another non-canonical worktree branch in the same repo with the same key but a different full branch unless `--allow-duplicate-issue-key` is passed. |
 | `protected_refs` | string array | empty | no | Exact names or regexes consumed by the guardrails personal hook layer when running in a wt-managed repo. git-wt core stores this in config but does not enforce protected refs itself. |
 | `worktree_symlinks` | string array | empty | no | Repo-relative paths symlinked from the canonical checkout into each new worktree by `wt new`. Repo list replaces defaults (no merge). See Worktree bootstrap. |
 | `setup_command` | string | none | no | Shell command run (`bash -c`) inside each new worktree after creation. Best-effort: failure warns, never fails `wt new`. See Worktree bootstrap. |
@@ -101,6 +105,8 @@ Each entry under `repos:` declares one canonical checkout.
 | `protected_refs` | string array | no | yes | Guardrails hook policy input for protected branches. |
 | `worktree_symlinks` | string array | no | yes (replaces) | Repo-relative paths to symlink into new worktrees. If present, replaces the default list. |
 | `setup_command` | string | no | yes | Per-repo bootstrap command run in new worktrees. |
+| `branch_issue_key_regex` | string | no | yes | Bash ERE extracting issue key from branch. First capture group wins; whole match fallback. Empty disables duplicate issue-key guard. |
+| `enforce_unique_issue_keys` | boolean-ish string | no | yes | Opt-in duplicate issue-key worktree guard for `wt new`, `wt move`, `wt adopt`. |
 
 Repo keys should be stable and shell-friendly: lowercase letters, digits, `_`, and `-` are safest. `wt onboard` sanitizes proposed names by lowercasing and replacing unsupported characters with `-`.
 
@@ -122,6 +128,24 @@ Behavior:
 - If a repo has at least one pattern, branch must match one of them.
 - If a repo has no patterns, any branch name is allowed after length validation.
 - `hooks.enforce_branch_names: true` makes generated pre-push hook cache enforce the same patterns at push time.
+
+## Issue-key uniqueness guard
+
+This optional guard catches accidental wrong-ticket work, for example creating `noam/ABC-123-admin-polish` while `noam/ABC-123-api-fix` already has a worktree in the same repo. It is generic: git-wt only extracts keys from branch names and compares existing non-canonical worktree branches. It does **not** call Linear, and it does **not** validate parent/child issue relationships.
+
+```yaml
+defaults:
+  branch_issue_key_regex: "^[^/]+/([A-Z]+-[0-9]+)-"
+  enforce_unique_issue_keys: true
+```
+
+Behavior:
+
+- Disabled unless `enforce_unique_issue_keys` is true and `branch_issue_key_regex` is non-empty.
+- Checks only configured worktrees for the same repo, not every local/remote branch.
+- Allows the same full branch name to proceed to normal existing-branch/path checks.
+- Rejects same key with different full branch before worktree creation.
+- Intentional stacked/split work can pass `--allow-duplicate-issue-key`.
 
 ## Protected refs
 

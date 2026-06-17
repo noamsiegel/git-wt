@@ -2,12 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.9] — issue-key branch guard
+
+### Added
+- Optional issue-key uniqueness guard: configure `branch_issue_key_regex` plus `enforce_unique_issue_keys` to reject `wt new`/`wt move`/`wt adopt` when another worktree branch in the same repo already uses the extracted issue key. Pass `--allow-duplicate-issue-key` for intentional stacked/split branches.
+
 ## [v0.10.8] — auto allows nested .envrc
 
 ### Changed
 - `setup_command: auto` now runs `direnv allow` on **every tracked `.envrc`** (root + nested), not just the worktree root. Fixes fresh worktrees of monorepo-shaped repos where a per-project hook (`direnv exec <subdir>`) would otherwise hit a blocked nested `.envrc`. Tracked = committed = already trusted; untracked `.envrc` are not auto-allowed, and nested dependency installs remain root-lockfile-only.
 
 ## [v0.10.7] — hook cache repo lookup alignment
+
 
 ### Fixed
 - `wt_repo_by_path` now emits one repo name per cached repo path, keeping `WT_REPO_PATHS` and `WT_REPO_NAMES` aligned when canonical paths and realpaths are identical.

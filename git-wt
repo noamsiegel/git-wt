@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.10.8"
+WT_VERSION="0.10.9"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -56,6 +56,7 @@ _CFG_LOADED=0
 declare -gA _CFG_REPO_FIELDS=()
 declare -gA _CFG_PATTERNS=()
 declare -gA _CFG_SYMLINKS=()
+declare -gA _CFG_ISSUE_KEY_REGEX=()
 _CFG_REPOS_LIST=""
 _CFG_FORBIDDEN_LIST=""
 _CFG_MAX_LEN=80
@@ -77,6 +78,9 @@ _cfg_load() {
       defaults.worktree_symlinks.*)
         _CFG_SYMLINKS[__defaults__]+="$value"$'\n'
         ;;
+ defaults.branch_issue_key_regex)
+ _CFG_ISSUE_KEY_REGEX[__defaults__]="$value"
+ ;;
       defaults.*)
         field="${key#defaults.}"
         _CFG_REPO_FIELDS["__defaults__.$field"]="$value"
@@ -95,6 +99,11 @@ _cfg_load() {
         _CFG_SYMLINKS[$repo]+="$value"$'\n'
         [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
         ;;
+ repos.*.branch_issue_key_regex)
+ repo="${key#repos.}"; repo="${repo%%.*}"
+ _CFG_ISSUE_KEY_REGEX[$repo]="$value"
+ [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+ ;;
       repos.*.*)
         repo="${key#repos.}"; field="${repo#*.}"; repo="${repo%%.*}"
         _CFG_REPO_FIELDS["$repo.$field"]="$value"
@@ -171,6 +180,17 @@ cfg_worktree_symlinks() {
 cfg_forbidden() { _cfg_load; printf '%s' "$_CFG_FORBIDDEN_LIST"; }
 cfg_max_branch_len() { _cfg_load; echo "$_CFG_MAX_LEN"; }
 cfg_hook_enforce_branch_names() { _cfg_load; echo "$_CFG_HOOK_ENFORCE_BRANCH_NAMES"; }
+cfg_branch_issue_key_regex() {
+ _cfg_load
+ local regex="${_CFG_ISSUE_KEY_REGEX[$1]:-}"
+ [[ -z "$regex" ]] && regex="${_CFG_ISSUE_KEY_REGEX[__defaults__]:-}"
+ printf '%s' "$regex"
+}
+cfg_enforce_unique_issue_keys() {
+ local v
+ v=$(cfg_repo_get "$1" enforce_unique_issue_keys 2>/dev/null || echo "")
+ [[ "$v" == "true" || "$v" == "1" || "$v" == "yes" ]]
+}
 
 # Realpath of a path; never fails (returns input on miss).
 rp() { realpath "$1" 2>/dev/null || echo "$1"; }
@@ -372,6 +392,38 @@ branch_policy_validate() {
   fi
   branch_policy_branch_matches "$repo" "$branch" \
     || die 10 "branch '$branch' does not match any configured pattern for repo '$repo'"
+}
+
+branch_issue_key() {
+  local repo="$1" branch="$2" regex
+  regex=$(cfg_branch_issue_key_regex "$repo")
+  [[ -n "$regex" ]] || return 1
+  [[ "$branch" =~ $regex ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]:-${BASH_REMATCH[0]}}"
+}
+
+branch_issue_key_duplicate() {
+  local repo="$1" branch="$2" key record r_repo r_id r_path r_rp_path r_branch r_sha r_is_canonical other_key
+  key=$(branch_issue_key "$repo" "$branch") || return 1
+  while IFS= read -r record; do
+    wt_record_fields "$record" r_repo r_id r_path r_rp_path r_branch r_sha r_is_canonical
+    [[ "$r_is_canonical" == "worktree" ]] || continue
+    [[ -n "$r_branch" && "$r_branch" != "$branch" ]] || continue
+    other_key=$(branch_issue_key "$repo" "$r_branch") || continue
+    [[ "$other_key" == "$key" ]] || continue
+    printf '%s\t%s\t%s\n' "$key" "$r_branch" "$r_path"
+    return 0
+  done < <(wt_each_worktree "$repo")
+  return 1
+}
+
+branch_issue_key_validate_unique() {
+  local repo="$1" branch="$2" allow_duplicate="${3:-0}" duplicate key existing_branch existing_path
+  cfg_enforce_unique_issue_keys "$repo" || return 0
+  [[ "$allow_duplicate" == "1" ]] && return 0
+  duplicate=$(branch_issue_key_duplicate "$repo" "$branch") || return 0
+  IFS=$'\t' read -r key existing_branch existing_path <<< "$duplicate"
+  die 20 "branch issue key '$key' already has worktree branch '$existing_branch' at $existing_path (use --allow-duplicate-issue-key to override)"
 }
 
 # Emit <repo>'s branch_patterns as a quoted bash array body for hook cache.
@@ -1105,15 +1157,16 @@ EOF
 }
 cmd_new() {
   guard_forbidden
-  local branch="" repo_override=""
+  local branch="" repo_override="" allow_duplicate_issue_key=0
   while (($#)); do
     case "$1" in
       --repo) repo_override="${2:-}"; shift 2 ;;
+      --allow-duplicate-issue-key) allow_duplicate_issue_key=1; shift ;;
       -*) die 10 "unknown flag: $1" ;;
       *) [[ -z "$branch" ]] && branch="$1" || die 10 "unexpected positional: $1"; shift ;;
     esac
   done
-  [[ -n "$branch" ]] || die 10 "usage: wt new [--repo <name>] <branch>"
+  [[ -n "$branch" ]] || die 10 "usage: wt new [--repo <name>] [--allow-duplicate-issue-key] <branch>"
 
   # Repo resolution priority: --repo flag > cwd inference > unique branch-pattern match > first config entry.
   local repo cwd_info
@@ -1143,6 +1196,7 @@ cmd_new() {
   [[ -d "$canonical/.git" || -f "$canonical/.git" ]] || die 20 "canonical $canonical is not a git repo"
 
   acquire_lock "$wt_root"
+  branch_issue_key_validate_unique "$repo" "$branch" "$allow_duplicate_issue_key"
   [[ -e "$target" ]] && die 20 "target path already exists: $target"
   wt_dir_registered "$repo" "$target" && die 20 "target path already registered as a worktree"
   branch_exists_local "$canonical" "$branch" && die 20 "branch already exists locally: $branch"
@@ -1175,16 +1229,17 @@ cmd_new() {
 
 cmd_adopt() {
   guard_forbidden
-  local branch="${1:-}" id_override="" commit_wip=0
+  local branch="${1:-}" id_override="" commit_wip=0 allow_duplicate_issue_key=0
   shift || true
   while (($#)); do
     case "$1" in
       --id) id_override="${2:-}"; shift 2 ;;
       --commit-wip) commit_wip=1; shift ;;
+      --allow-duplicate-issue-key) allow_duplicate_issue_key=1; shift ;;
       *) die 10 "unknown flag: $1" ;;
     esac
   done
-  [[ -n "$branch" ]] || die 10 "usage: wt adopt <branch> [--id <id>]"
+  [[ -n "$branch" ]] || die 10 "usage: wt adopt <branch> [--id <id>] [--commit-wip] [--allow-duplicate-issue-key]"
   local repo
   local cwd_info
   if cwd_info=$(repo_for_cwd 2>/dev/null); then
@@ -1207,6 +1262,7 @@ cmd_adopt() {
   [[ -e "$target" ]] && die 20 "target path already exists: $target"
 
   acquire_lock "$wt_root"
+  branch_issue_key_validate_unique "$repo" "$branch" "$allow_duplicate_issue_key"
   local original_branch
   original_branch=$(git_in "$canonical" rev-parse --abbrev-ref HEAD)
   local original_clean=1
@@ -1251,15 +1307,16 @@ cmd_adopt() {
 
 cmd_move() {
   guard_forbidden
-  local branch="" repo_override=""
+  local branch="" repo_override="" allow_duplicate_issue_key=0
   while (($#)); do
     case "$1" in
       --repo) repo_override="${2:-}"; shift 2 ;;
+      --allow-duplicate-issue-key) allow_duplicate_issue_key=1; shift ;;
       -*) die 10 "unknown flag: $1" ;;
       *) [[ -z "$branch" ]] && branch="$1" || die 10 "unexpected positional: $1"; shift ;;
     esac
   done
-  [[ -n "$branch" ]] || die 10 "usage: wt move [--repo <name>] <branch>"
+  [[ -n "$branch" ]] || die 10 "usage: wt move [--repo <name>] [--allow-duplicate-issue-key] <branch>"
 
   # Move only makes sense from inside canonical: cwd has the dirty work to relocate.
   local repo cwd_info kind
@@ -1300,6 +1357,7 @@ cmd_move() {
   fi
 
   acquire_lock "$wt_root"
+  branch_issue_key_validate_unique "$repo" "$branch" "$allow_duplicate_issue_key"
   [[ -e "$target" ]] && die 20 "target path already exists: $target"
   wt_dir_registered "$repo" "$target" && die 20 "target path already registered as a worktree"
   branch_exists_local "$canonical" "$branch" && die 20 "branch already exists locally: $branch"
@@ -1967,9 +2025,12 @@ cmd_help() {
   cat <<EOF
 wt $WT_VERSION — worktree CLI
 
-  wt new <branch>              create new worktree branched from <base>
-  wt adopt <branch> [--id <id>]  move an existing branch into a worktree
-  wt move <branch>             relocate uncommitted canonical work to a new worktree
+  wt new [--repo <name>] [--allow-duplicate-issue-key] <branch>
+                              create new worktree branched from <base>
+  wt adopt <branch> [--id <id>] [--commit-wip] [--allow-duplicate-issue-key]
+                              move an existing branch into a worktree
+  wt move [--repo <name>] [--allow-duplicate-issue-key] <branch>
+                              relocate uncommitted canonical work to new worktree
   wt pr <number>               create worktree for inbound PR (fetches pull/<n>/head)
   wt list                      list worktrees per configured repo
   wt status [--refresh]        list + reap-eligibility (clean/pushed/reachable/tab)

@@ -13,6 +13,11 @@ defaults:
     - "^yourname/[a-z0-9-]+$"
     - "^yourname/[A-Z]+-[0-9]+-[a-z0-9-]+$"
     - "^pr-[0-9]+$"
+  # Optional: extract issue keys from branch names and reject duplicate issue-key
+  # worktrees in the same repo. Generic only; no Linear API or parent/child check.
+  # Override intentionally with `wt new --allow-duplicate-issue-key <branch>`.
+  # branch_issue_key_regex: "^[^/]+/([A-Z]+-[0-9]+)-"
+  # enforce_unique_issue_keys: true
   # Protected refs (block direct push). Each entry is an EXACT branch name OR
   # a regex (auto-detected: starts with ^ or contains *?+|()[]{}\). Read by
   # guardrails branch-guard when running inside a wt-managed repo.
@@ -39,6 +44,8 @@ repos:
     branch_patterns:
       - "^yourname/[A-Z]+-[0-9]+-[a-z0-9-]+$"
       - "^pr-[0-9]+$"
+    # branch_issue_key_regex: "^[^/]+/([A-Z]+-[0-9]+)-"
+    # enforce_unique_issue_keys: true
 
   example-service:
     path: ~/code/example-service
