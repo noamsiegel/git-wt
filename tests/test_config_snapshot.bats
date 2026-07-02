@@ -92,3 +92,54 @@ teardown() {
   [ "$worktree_root" = "$FIX/wt-fixrepo" ]
   [ "$herdr_workspace" = "team-fixrepo" ]
 }
+
+@test "cfg_bootstrap_linked_dirs parses structured linked dirs" {
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].path = "deps/node_modules"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].source = "canonical"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].drift_files[0] = "deps/yarn.lock"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].drift_files[1] = "deps/package.json"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].required_paths[0] = ".bin/vitest"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].required_paths[1] = ".bin/tsc"' "$WT_CONFIG"
+  cfg_reload
+
+  run cfg_bootstrap_linked_dirs fixrepo
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  IFS=$'\034' read -r path source drift_files required_paths <<< "$output"
+  [ "$path" = "deps/node_modules" ]
+  [ "$source" = "canonical" ]
+  [ "$drift_files" = "deps/yarn.lock\ndeps/package.json" ]
+  [ "$required_paths" = ".bin/vitest\n.bin/tsc" ]
+}
+
+@test "repo bootstrap linked dirs replace defaults" {
+  yq -i '.defaults.bootstrap.linked_dirs[0].path = "default/node_modules"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].path = "repo/node_modules"' "$WT_CONFIG"
+  cfg_reload
+
+  run cfg_bootstrap_linked_dirs fixrepo
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 1 ]
+  IFS=$'\034' read -r path _source _drift_files _required_paths <<< "$output"
+  [ "$path" = "repo/node_modules" ]
+}
+
+@test "cfg_bootstrap_env_symlinks emits legacy worktree_symlinks when structured env symlinks absent" {
+  yq -i '.repos.fixrepo.worktree_symlinks[0] = ".env.local"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.worktree_symlinks[1] = "apps/web/.env.local"' "$WT_CONFIG"
+  cfg_reload
+
+  run cfg_bootstrap_env_symlinks fixrepo
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = ".env.local" ]
+  [ "${lines[1]}" = "apps/web/.env.local" ]
+}
+
+@test "cfg_bootstrap_post_create emits legacy setup_command when structured post_create absent" {
+  yq -i '.repos.fixrepo.setup_command = "touch SETUP_RAN"' "$WT_CONFIG"
+  cfg_reload
+
+  run cfg_bootstrap_post_create fixrepo
+  [ "$status" -eq 0 ]
+  [ "$output" = "touch SETUP_RAN" ]
+}

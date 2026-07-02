@@ -87,8 +87,8 @@ Defaults are inherited by every repo unless the repo overrides the field.
 | `branch_issue_key_regex` | Bash ERE string | empty | no | Optional issue-key extractor used by `wt new`, `wt move`, and `wt adopt`. If unset, the duplicate issue-key guard is disabled. The first capture group is the key; without a group, the whole match is the key. |
 | `enforce_unique_issue_keys` | boolean-ish string | unset/false | no | When true and `branch_issue_key_regex` extracts a key, reject creating/adopting another non-canonical worktree branch in the same repo with the same key but a different full branch unless `--allow-duplicate-issue-key` is passed. |
 | `protected_refs` | string array | empty | no | Exact names or regexes consumed by the guardrails personal hook layer when running in a wt-managed repo. git-wt core stores this in config but does not enforce protected refs itself. |
-| `worktree_symlinks` | string array | empty | no | Repo-relative paths symlinked from the canonical checkout into each new worktree by `wt new`. Repo list replaces defaults (no merge). See Worktree bootstrap. |
-| `setup_command` | string | none | no | Shell command run (`bash -c`) inside each new worktree after creation. Best-effort: failure warns, never fails `wt new`. See Worktree bootstrap. |
+| `worktree_symlinks` | string array | empty | no | Legacy alias for `bootstrap.env.symlinks` when structured env symlinks absent. Repo list replaces defaults (no merge). |
+| `setup_command` | string | none | no | Legacy alias for `bootstrap.post_create` when structured post-create absent. `auto` keeps lockfile-aware setup behavior. |
 
 ## `repos.<name>` fields
 
@@ -103,8 +103,8 @@ Each entry under `repos:` declares one canonical checkout.
 | `herdr_workspace` | string | no | yes | Workspace name retained for tab-plugin compatibility and config records. |
 | `branch_patterns` | string array | no | yes | Repo-specific branch regexes. If present, they replace default patterns for this repo. |
 | `protected_refs` | string array | no | yes | Guardrails hook policy input for protected branches. |
-| `worktree_symlinks` | string array | no | yes (replaces) | Repo-relative paths to symlink into new worktrees. If present, replaces the default list. |
-| `setup_command` | string | no | yes | Per-repo bootstrap command run in new worktrees. |
+| `worktree_symlinks` | string array | no | yes (replaces) | Legacy env symlink list. Used only when `bootstrap.env.symlinks` absent. |
+| `setup_command` | string | no | yes | Legacy post-create command. Used only when `bootstrap.post_create` absent. |
 | `branch_issue_key_regex` | string | no | yes | Bash ERE extracting issue key from branch. First capture group wins; whole match fallback. Empty disables duplicate issue-key guard. |
 | `enforce_unique_issue_keys` | boolean-ish string | no | yes | Opt-in duplicate issue-key worktree guard for `wt new`, `wt move`, `wt adopt`. |
 
@@ -179,54 +179,153 @@ Use this to keep git-wt from creating or operating in directory trees owned by o
 
 ## Worktree bootstrap
 
-`wt new` can seed a fresh worktree with gitignored env files and run a setup
-command, so new worktrees are usable without manual copying or re-installing
-dependencies.
+`wt new` seeds a worktree in this order: copy small ignored files from
+`.worktreeinclude`, create configured bootstrap symlinks, write generated port
+exports, run direnv handling, then run post-create commands. Dependency dirs
+are symlinked only when configured in `bootstrap.linked_dirs`; they are never
+copied by `.worktreeinclude` or installed by git-wt.
 
 ```yaml
 defaults:
-  # Symlink these gitignored files from the canonical checkout into each new
-  # worktree (live coupling; the worktree shares the canonical's copy).
-  worktree_symlinks:
-    - .env.local
-    - .envrc-personal
-  # Run after creation, with cwd = the new worktree. Best-effort.
-  setup_command: "direnv allow"
+  bootstrap:
+    env:
+      # Symlink small gitignored env files from the canonical checkout.
+      symlinks:
+        - .env.local
+        - .envrc-personal
+      # auto = root .envrc plus tracked nested .envrc files.
+      # true = root .envrc only. false = disabled.
+      direnv: auto
+    ports:
+      strategy: deterministic-hash
+      output: .wt/ports.env
+      variables:
+        APP_PORT:
+          base: 17000
+          span: 1000
+    post_create:
+      - auto
 
 repos:
   my-repo:
-    worktree_symlinks:
-      - .env
-    setup_command: "direnv allow && yarn install"
+    bootstrap:
+      env:
+        symlinks:
+          - .env
+          - .envrc-personal
+        direnv: auto
+      linked_dirs:
+        - path: apps/web/node_modules
+          source: canonical
+          drift_files:
+            - apps/web/package.json
+            - apps/web/yarn.lock
+          required_paths:
+            - .bin/vitest
+            - .bin/tsc
+      ports:
+        strategy: deterministic-hash
+        output: .wt/ports.env
+        variables:
+          WEB_PORT:
+            base: 18000
+            span: 1000
+      post_create:
+        - auto
 ```
 
-### `worktree_symlinks`
+### `bootstrap.env.symlinks`
 
 - Each entry is a path relative to the repo root.
-- On `wt new`, git-wt creates `worktree/<path>` as a symlink to `canonical/<path>`.
-- Never clobbers: if `worktree/<path>` already exists (tracked, or copied via `.worktreeinclude`), the entry is skipped.
-- Missing source: if `canonical/<path>` does not exist, git-wt warns and continues — `wt new` still succeeds.
-- Path-escape entries (absolute, or containing `..`) are refused with a warning.
-- Repo-level `worktree_symlinks` replaces the defaults list (no merge), mirroring `branch_patterns`.
-- Contrast with `.worktreeinclude`, which *copies* gitignored files into the worktree. `worktree_symlinks` *links* them — use it for files you want kept in a single source of truth; use `.worktreeinclude` for files each worktree should own independently.
-- Security: only the exact paths you list are linked. Never use it to bulk-link a directory of secrets you do not intend to expose in every worktree.
+- On `wt new` or `wt bootstrap --repair`, git-wt creates
+  `worktree/<path>` symlink to `canonical/<path>`.
+- Existing targets are never clobbered.
+- Missing sources warn and bootstrap continues.
+- Path escapes (absolute paths or `..`) are refused.
+- Repo-level structured env symlinks replace defaults; they do not merge.
+- Legacy `worktree_symlinks` remains compatible: when
+  `bootstrap.env.symlinks` is absent, git-wt reads `worktree_symlinks`.
+- Security: only exact listed paths are linked. Do not bulk-link directory
+  secrets you do not intend to expose in every worktree.
 
-### `setup_command`
+### `bootstrap.linked_dirs`
 
-- A single shell string, run as `bash -c "<command>"` with the working directory set to the new worktree, after symlinks are created.
-- Best-effort: a non-zero exit prints a warning but does not undo or fail worktree creation (consistent with the plugin-failure invariant — see CONTEXT.md).
-- Typical uses: `direnv allow`, dependency install (`yarn install`, `uv sync`), or a project bootstrap script. Prefer fast, idempotent commands.
-- It runs only on `wt new` (not `wt adopt`, `wt move`, or `wt pr`).
-- Special value `auto`: detect the toolchain from lockfiles at the worktree root and run the matching cache-backed installer, then `direnv allow` if an `.envrc` is present. Detection (each runs if its lockfile + tool are present; multiple may run for polyglot repos):
+- Each entry `path` is a repo-relative dependency directory.
+- `source: canonical` is the supported source. Empty source also means
+  canonical.
+- On `wt new` or `wt bootstrap --repair`, git-wt creates
+  `worktree/<path>` symlink to `canonical/<path>`.
+- Linked dirs are symlink-only. They are never copied or installed by git-wt.
+- Put heavy dependency dirs such as `node_modules` here, not in
+  `.worktreeinclude`.
+- `.worktreeinclude` remains copy-only for small ignored files a worktree
+  should own independently.
+- Existing targets are never clobbered. If a target exists and is not a
+  symlink to the expected canonical source, git-wt warns and leaves it
+  unchanged.
+- Missing canonical source warns and bootstrap continues.
+- Unsafe `path`, `drift_files`, and `required_paths` entries (absolute paths or
+  entries containing `..`) are refused.
+- `drift_files` are repo-relative files, typically lockfiles or package
+  manifests. Doctor compares canonical and worktree contents.
+- `required_paths` are checked under the canonical linked dir source, for
+  example `.bin/vitest` under `apps/web/node_modules`.
+- Repo-level structured linked dirs replace defaults; they do not merge.
+
+### `bootstrap.env.direnv`
+
+- `auto`: authorize root `.envrc` and every tracked nested `.envrc`.
+- `true`: authorize root `.envrc`.
+- `false`: skip structured direnv handling.
+- Empty value preserves legacy behavior: `setup_command: auto` still runs its
+  direnv handling when structured `bootstrap.post_create` is absent.
+
+### `bootstrap.ports`
+
+- `strategy` supports `deterministic-hash`.
+- `output` defaults to `.wt/ports.env`.
+- Each `variables.<NAME>` entry requires integer `base` and positive `span`.
+- Variable names must match `^[A-Z_][A-Z0-9_]*$`.
+- Port value is deterministic per repo, worktree id, and variable name:
+  `base + hash(repo:id:NAME) % span`.
+- Output file starts with git-wt's generated marker and is overwritten only
+  when that marker is present. Existing unmarked files are left unchanged.
+- Projects must source `.wt/ports.env` from `.envrc` or `.envrc-personal` if
+  shell commands need the generated variables:
+
+```bash
+if [ -f .wt/ports.env ]; then
+  source .wt/ports.env
+fi
+```
+
+### `bootstrap.post_create`
+
+- Ordered list of best-effort post-create actions run after env symlinks,
+  linked dirs, ports, and structured direnv handling.
+- Item `auto` runs lockfile-aware setup:
   - `uv.lock` → `uv sync`
   - `bun.lockb` / `bun.lock` → `bun install`
   - `pnpm-lock.yaml` → `pnpm install`
   - `yarn.lock` → `yarn install`
   - `package-lock.json` → `npm ci`
-  Each step is best-effort (missing tool or failed install warns, never fails `wt new`). Heavy dependency dirs are never copied or symlinked across worktrees — the installer's global cache (uv/bun/pnpm) keeps per-worktree installs cheap. Put `setup_command: auto` in `defaults` to auto-provision every repo.
+  plus direnv authorization for root and tracked nested `.envrc` files.
+- Other items run as `bash -c "<item>"` with cwd set to the worktree.
+- Non-zero exit prints a warning but does not undo or fail worktree creation.
+- Legacy `setup_command` remains compatible: when `bootstrap.post_create` is
+  absent, git-wt reads `setup_command`. `setup_command: auto` keeps legacy
+  lockfile-aware behavior.
 
-Inspect whether a worktree's symlinks and dependencies are in place with
-`wt doctor --worktree <id>`.
+Inspect bootstrap state without mutation:
+
+```bash
+wt bootstrap --check <id>
+wt doctor --worktree <id>
+```
+
+`wt bootstrap --repair <id>` reruns idempotent bootstrap for existing
+worktrees. It recreates missing configured symlinks and generated ports; it
+does not install dependencies.
 
 ## Hooks
 

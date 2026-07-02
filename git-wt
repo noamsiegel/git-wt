@@ -56,6 +56,17 @@ _CFG_LOADED=0
 declare -gA _CFG_REPO_FIELDS=()
 declare -gA _CFG_PATTERNS=()
 declare -gA _CFG_SYMLINKS=()
+declare -gA _CFG_BOOT_LINKED_PATH=()
+declare -gA _CFG_BOOT_LINKED_SOURCE=()
+declare -gA _CFG_BOOT_LINKED_DRIFT=()
+declare -gA _CFG_BOOT_LINKED_REQUIRED=()
+declare -gA _CFG_BOOT_ENV_SYMLINKS=()
+declare -gA _CFG_BOOT_DIRENV=()
+declare -gA _CFG_BOOT_POST_CREATE=()
+declare -gA _CFG_BOOT_PORT_STRATEGY=()
+declare -gA _CFG_BOOT_PORT_OUTPUT=()
+declare -gA _CFG_BOOT_PORT_VAR_BASE=()
+declare -gA _CFG_BOOT_PORT_VAR_SPAN=()
 declare -gA _CFG_ISSUE_KEY_REGEX=()
 _CFG_REPOS_LIST=""
 _CFG_FORBIDDEN_LIST=""
@@ -65,7 +76,7 @@ _CFG_REPO_RECORD_FIELDS=(repo path worktree_root base default_branch herdr_works
 
 _cfg_load() {
   (( _CFG_LOADED == 1 )) && return 0
-  local line key value repo field seen=":"
+  local line key value repo field rest idx name seen=":"
   while IFS= read -r line; do
     [[ -z "$line" || "$line" == \#* ]] && continue
     [[ "$line" != *=* ]] && continue
@@ -78,6 +89,45 @@ _cfg_load() {
       defaults.worktree_symlinks.*)
         _CFG_SYMLINKS[__defaults__]+="$value"$'\n'
         ;;
+    defaults.bootstrap.linked_dirs.*.path)
+      rest="${key#defaults.bootstrap.linked_dirs.}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_PATH["__defaults__.$idx"]="$value"
+      ;;
+    defaults.bootstrap.linked_dirs.*.source)
+      rest="${key#defaults.bootstrap.linked_dirs.}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_SOURCE["__defaults__.$idx"]="$value"
+      ;;
+    defaults.bootstrap.linked_dirs.*.drift_files.*)
+      rest="${key#defaults.bootstrap.linked_dirs.}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_DRIFT["__defaults__.$idx"]+="$value"$'\n'
+      ;;
+    defaults.bootstrap.linked_dirs.*.required_paths.*)
+      rest="${key#defaults.bootstrap.linked_dirs.}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_REQUIRED["__defaults__.$idx"]+="$value"$'\n'
+      ;;
+    defaults.bootstrap.env.symlinks.*)
+      _CFG_BOOT_ENV_SYMLINKS[__defaults__]+="$value"$'\n'
+      ;;
+    defaults.bootstrap.env.direnv)
+      _CFG_BOOT_DIRENV[__defaults__]="$value"
+      ;;
+    defaults.bootstrap.ports.strategy)
+      _CFG_BOOT_PORT_STRATEGY[__defaults__]="$value"
+      ;;
+    defaults.bootstrap.ports.output)
+      _CFG_BOOT_PORT_OUTPUT[__defaults__]="$value"
+      ;;
+    defaults.bootstrap.ports.variables.*.base)
+      name="${key#defaults.bootstrap.ports.variables.}"; name="${name%%.*}"
+      _CFG_BOOT_PORT_VAR_BASE["__defaults__.$name"]="$value"
+      ;;
+    defaults.bootstrap.ports.variables.*.span)
+      name="${key#defaults.bootstrap.ports.variables.}"; name="${name%%.*}"
+      _CFG_BOOT_PORT_VAR_SPAN["__defaults__.$name"]="$value"
+      ;;
+    defaults.bootstrap.post_create.*)
+      _CFG_BOOT_POST_CREATE[__defaults__]+="$value"$'\n'
+      ;;
  defaults.branch_issue_key_regex)
  _CFG_ISSUE_KEY_REGEX[__defaults__]="$value"
  ;;
@@ -99,6 +149,61 @@ _cfg_load() {
         _CFG_SYMLINKS[$repo]+="$value"$'\n'
         [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
         ;;
+    repos.*.bootstrap.linked_dirs.*.path)
+      repo="${key#repos.}"; rest="${repo#*.bootstrap.linked_dirs.}"; repo="${repo%%.*}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_PATH["$repo.$idx"]="$value"
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.linked_dirs.*.source)
+      repo="${key#repos.}"; rest="${repo#*.bootstrap.linked_dirs.}"; repo="${repo%%.*}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_SOURCE["$repo.$idx"]="$value"
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.linked_dirs.*.drift_files.*)
+      repo="${key#repos.}"; rest="${repo#*.bootstrap.linked_dirs.}"; repo="${repo%%.*}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_DRIFT["$repo.$idx"]+="$value"$'\n'
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.linked_dirs.*.required_paths.*)
+      repo="${key#repos.}"; rest="${repo#*.bootstrap.linked_dirs.}"; repo="${repo%%.*}"; idx="${rest%%.*}"
+      _CFG_BOOT_LINKED_REQUIRED["$repo.$idx"]+="$value"$'\n'
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.env.symlinks.*)
+      repo="${key#repos.}"; repo="${repo%%.*}"
+      _CFG_BOOT_ENV_SYMLINKS[$repo]+="$value"$'\n'
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.env.direnv)
+      repo="${key#repos.}"; repo="${repo%%.*}"
+      _CFG_BOOT_DIRENV[$repo]="$value"
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.ports.strategy)
+      repo="${key#repos.}"; repo="${repo%%.*}"
+      _CFG_BOOT_PORT_STRATEGY[$repo]="$value"
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.ports.output)
+      repo="${key#repos.}"; repo="${repo%%.*}"
+      _CFG_BOOT_PORT_OUTPUT[$repo]="$value"
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.ports.variables.*.base)
+      repo="${key#repos.}"; rest="${repo#*.bootstrap.ports.variables.}"; repo="${repo%%.*}"; name="${rest%%.*}"
+      _CFG_BOOT_PORT_VAR_BASE["$repo.$name"]="$value"
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.ports.variables.*.span)
+      repo="${key#repos.}"; rest="${repo#*.bootstrap.ports.variables.}"; repo="${repo%%.*}"; name="${rest%%.*}"
+      _CFG_BOOT_PORT_VAR_SPAN["$repo.$name"]="$value"
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
+    repos.*.bootstrap.post_create.*)
+      repo="${key#repos.}"; repo="${repo%%.*}"
+      _CFG_BOOT_POST_CREATE[$repo]+="$value"$'\n'
+      [[ ":$seen:" == *":$repo:"* ]] || { _CFG_REPOS_LIST+="$repo"$'\n'; seen+="$repo:"; }
+      ;;
  repos.*.branch_issue_key_regex)
  repo="${key#repos.}"; repo="${repo%%.*}"
  _CFG_ISSUE_KEY_REGEX[$repo]="$value"
@@ -176,6 +281,111 @@ cfg_worktree_symlinks() {
   local links="${_CFG_SYMLINKS[$1]:-}"
   [[ -z "$links" ]] && links="${_CFG_SYMLINKS[__defaults__]:-}"
   printf '%s' "$links"
+}
+_cfg_escape_lines() {
+  local value="$1" line out="" sep=""
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    out+="$sep$line"
+    sep='\n'
+  done <<< "$value"
+  printf '%s' "$out"
+}
+_cfg_record_field_lines() {
+  local value="$1"
+  [[ -z "$value" ]] && return 0
+  printf '%s\n' "${value//\\n/$'\n'}"
+}
+_cfg_has_prefixed_key() {
+  local prefix="$1" key
+  shift
+  for key in "$@"; do [[ "$key" == "$prefix"* ]] && return 0; done
+  return 1
+}
+_cfg_bootstrap_linked_scope() {
+  local repo="$1"
+  _cfg_load
+  _cfg_has_prefixed_key "$repo." "${!_CFG_BOOT_LINKED_PATH[@]}" && { printf '%s' "$repo"; return 0; }
+  _cfg_has_prefixed_key "__defaults__." "${!_CFG_BOOT_LINKED_PATH[@]}" && printf '%s' "__defaults__"
+}
+cfg_bootstrap_linked_dirs() {
+  _cfg_load
+  local repo="$1" scope idx path source drift required
+  scope=$(_cfg_bootstrap_linked_scope "$repo")
+  [[ -z "$scope" ]] && return 0
+  for ((idx=0; idx<1000; idx++)); do
+    path="${_CFG_BOOT_LINKED_PATH[$scope.$idx]:-}"
+    [[ -z "$path" ]] && continue
+    source="${_CFG_BOOT_LINKED_SOURCE[$scope.$idx]:-canonical}"
+    drift=$(_cfg_escape_lines "${_CFG_BOOT_LINKED_DRIFT[$scope.$idx]:-}")
+    required=$(_cfg_escape_lines "${_CFG_BOOT_LINKED_REQUIRED[$scope.$idx]:-}")
+    printf '%s\034%s\034%s\034%s\n' "$path" "$source" "$drift" "$required"
+  done
+}
+cfg_bootstrap_env_symlinks() {
+  _cfg_load
+  local repo="$1" links
+  links="${_CFG_BOOT_ENV_SYMLINKS[$repo]:-}"
+  if [[ -n "$links" ]]; then printf '%s' "$links"; return 0; fi
+  links="${_CFG_BOOT_ENV_SYMLINKS[__defaults__]:-}"
+  if [[ -n "$links" ]]; then printf '%s' "$links"; return 0; fi
+  cfg_worktree_symlinks "$repo"
+}
+cfg_bootstrap_direnv() {
+  _cfg_load
+  local repo="$1" value
+  value="${_CFG_BOOT_DIRENV[$repo]:-}"
+  [[ -z "$value" ]] && value="${_CFG_BOOT_DIRENV[__defaults__]:-}"
+  printf '%s' "$value"
+}
+cfg_bootstrap_post_create() {
+  _cfg_load
+  local repo="$1" items
+  items="${_CFG_BOOT_POST_CREATE[$repo]:-}"
+  [[ -z "$items" ]] && items="${_CFG_BOOT_POST_CREATE[__defaults__]:-}"
+  if [[ -z "$items" ]]; then
+    local legacy
+    legacy=$(cfg_repo_get "$repo" setup_command)
+    [[ -n "$legacy" && "$legacy" != "null" ]] && printf '%s\n' "$legacy"
+    return 0
+  fi
+  printf '%s' "$items"
+}
+_cfg_bootstrap_ports_scope() {
+  local repo="$1"
+  _cfg_load
+  if [[ -n "${_CFG_BOOT_PORT_STRATEGY[$repo]:-}${_CFG_BOOT_PORT_OUTPUT[$repo]:-}" ]] || _cfg_has_prefixed_key "$repo." "${!_CFG_BOOT_PORT_VAR_BASE[@]}" "${!_CFG_BOOT_PORT_VAR_SPAN[@]}"; then
+    printf '%s' "$repo"; return 0
+  fi
+  if [[ -n "${_CFG_BOOT_PORT_STRATEGY[__defaults__]:-}${_CFG_BOOT_PORT_OUTPUT[__defaults__]:-}" ]] || _cfg_has_prefixed_key "__defaults__." "${!_CFG_BOOT_PORT_VAR_BASE[@]}" "${!_CFG_BOOT_PORT_VAR_SPAN[@]}"; then
+    printf '%s' "__defaults__"
+  fi
+}
+cfg_bootstrap_has_structured_post_create() {
+  _cfg_load
+  local repo="$1"
+  [[ -n "${_CFG_BOOT_POST_CREATE[$repo]:-}" || -n "${_CFG_BOOT_POST_CREATE[__defaults__]:-}" ]]
+}
+cfg_bootstrap_ports() {
+  _cfg_load
+  local repo="$1" scope strategy output key name names="" base span
+  scope=$(_cfg_bootstrap_ports_scope "$repo")
+  [[ -z "$scope" ]] && return 0
+  strategy="${_CFG_BOOT_PORT_STRATEGY[$scope]:-}"
+  output="${_CFG_BOOT_PORT_OUTPUT[$scope]:-}"
+  printf 'config\034%s\034%s\n' "$strategy" "$output"
+  for key in "${!_CFG_BOOT_PORT_VAR_BASE[@]}" "${!_CFG_BOOT_PORT_VAR_SPAN[@]}"; do
+    [[ "$key" == "$scope."* ]] || continue
+    name="${key#$scope.}"
+    [[ $'\n'"$names" == *$'\n'"$name"$'\n'* ]] && continue
+    names+="$name"$'\n'
+  done
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    base="${_CFG_BOOT_PORT_VAR_BASE[$scope.$name]:-}"
+    span="${_CFG_BOOT_PORT_VAR_SPAN[$scope.$name]:-}"
+    printf 'var\034%s\034%s\034%s\n' "$name" "$base" "$span"
+  done < <(printf '%s' "$names" | sort)
 }
 cfg_forbidden() { _cfg_load; printf '%s' "$_CFG_FORBIDDEN_LIST"; }
 cfg_max_branch_len() { _cfg_load; echo "$_CFG_MAX_LEN"; }
@@ -833,11 +1043,10 @@ copy_worktreeinclude_files() {
   fi
 }
 
-# Symlink configured worktree_symlinks (gitignored env/config files) from the
-# canonical checkout into a new worktree. Live coupling, unlike .worktreeinclude
-# (which copies). Never clobbers existing files; warns (never fails) on a missing
-# source; refuses path-escape entries.
-link_worktree_symlinks() {
+# Symlink configured env/config files from canonical checkout into new worktree.
+# Live coupling, unlike .worktreeinclude copies. Never clobbers existing files;
+# warns (never fails) on missing source; refuses path-escape entries.
+link_bootstrap_env_symlinks() {
   local repo="$1" canonical="$2" target="$3" relpath src dst count=0
   while IFS= read -r relpath; do
     [[ -z "$relpath" ]] && continue
@@ -856,15 +1065,76 @@ link_worktree_symlinks() {
     if ln -s "$src" "$dst" 2>/dev/null; then
       count=$((count + 1))
     else
-      warn "worktree_symlinks: failed to link: $relpath"
+      warn "worktree_symlinks: failed link: $relpath"
     fi
-  done < <(cfg_worktree_symlinks "$repo")
+  done < <(cfg_bootstrap_env_symlinks "$repo")
   if (( count > 0 )); then info "$(dim "→ linked $count file(s) into worktree")"; fi
   return 0
 }
+link_worktree_symlinks() { link_bootstrap_env_symlinks "$@"; }
 
-# Run a configured per-repo setup_command inside a freshly created worktree.
-# Best-effort: a non-zero exit warns but never undoes worktree creation.
+_bootstrap_safe_relpath() {
+  local rel="$1"
+  [[ -n "$rel" && "$rel" != /* && "$rel" != *..* ]]
+}
+_bootstrap_link_expected() {
+  local link="$1" expected="$2" actual
+  [[ -L "$link" ]] || return 1
+  actual=$(readlink "$link" 2>/dev/null || true)
+  [[ "$actual" == "$expected" ]]
+}
+link_bootstrap_linked_dirs() {
+  local repo="$1" canonical="$2" target="$3" rec path source drift_files required_paths src dst count=0
+  while IFS= read -r rec; do
+    [[ -z "$rec" ]] && continue
+    IFS=$'\034' read -r path source drift_files required_paths <<< "$rec"
+    if ! _bootstrap_safe_relpath "$path"; then
+      warn "bootstrap linked_dirs: refusing unsafe path: $path"
+      continue
+    fi
+    if [[ -n "$source" && "$source" != "canonical" ]]; then
+      warn "bootstrap linked_dirs: unsupported source '$source', skipped: $path"
+      continue
+    fi
+    src="$canonical/$path"
+    dst="$target/$path"
+    if [[ -e "$dst" || -L "$dst" ]]; then
+      _bootstrap_link_expected "$dst" "$src" || warn "bootstrap linked_dirs: target exists and is not expected symlink: $path"
+      continue
+    fi
+    if [[ ! -e "$src" ]]; then
+      warn "bootstrap linked_dirs: source missing, skipped: $path"
+      continue
+    fi
+    mkdir -p "$(dirname "$dst")"
+    if ln -s "$src" "$dst" 2>/dev/null; then
+      count=$((count + 1))
+    else
+      warn "bootstrap linked_dirs: failed link: $path"
+    fi
+  done < <(cfg_bootstrap_linked_dirs "$repo")
+  if (( count > 0 )); then info "$(dim "→ linked $count bootstrap dir(s) into worktree")"; fi
+  return 0
+}
+
+run_setup_direnv() {
+  local target="$1" envrc envrc_n=0
+  have direnv || return 0
+  if [[ -e "$target/.envrc" ]]; then
+    if ( cd "$target" && direnv allow . >/dev/null 2>&1 ); then envrc_n=$((envrc_n + 1)); fi
+  fi
+  while IFS= read -r envrc; do
+    [[ -f "$target/$envrc" ]] || continue
+    if ( cd "$target" && direnv allow "$envrc" >/dev/null 2>&1 ); then envrc_n=$((envrc_n + 1)); fi
+  done < <(git -C "$target" ls-files 2>/dev/null | grep -E '/\.envrc$' || true)
+  if (( envrc_n > 0 )); then
+    info "$(dim "→ auto-setup: direnv allow (${envrc_n} .envrc)")"
+  fi
+  return 0
+}
+
+# Run configured per-repo setup_command inside freshly created worktree.
+# Best-effort: non-zero exit warns but never undoes worktree creation.
 run_setup_command() {
   local repo="$1" target="$2" cmd rc=0
   cmd=$(cfg_repo_get "$repo" setup_command)
@@ -897,27 +1167,164 @@ run_setup_auto() {
   _auto_run pnpm-lock.yaml pnpm pnpm install
   _auto_run yarn.lock yarn yarn install
   _auto_run package-lock.json npm npm ci
-  # Authorize direnv: the root .envrc (allow on existence — it may be
-  # gitignored or symlinked in) plus every *tracked* nested .envrc. Tracked =
-  # committed = already trusted, and it covers monorepo-shaped repos whose
-  # per-project hooks `direnv exec <subdir>` would otherwise hit a blocked
-  # .envrc on a fresh worktree.
-  if have direnv; then
-    local envrc envrc_n=0
-    if [[ -e "$target/.envrc" ]]; then
-      if ( cd "$target" && direnv allow . >/dev/null 2>&1 ); then envrc_n=$((envrc_n + 1)); fi
-    fi
-    while IFS= read -r envrc; do
-      [[ -f "$target/$envrc" ]] || continue
-      if ( cd "$target" && direnv allow "$envrc" >/dev/null 2>&1 ); then envrc_n=$((envrc_n + 1)); fi
-    done < <(git -C "$target" ls-files 2>/dev/null | grep -E '/\.envrc$' || true)
-    if (( envrc_n > 0 )); then
-      ran=1
-      info "$(dim "→ auto-setup: direnv allow (${envrc_n} .envrc)")"
-    fi
+  # Authorize direnv: root .envrc plus every tracked nested .envrc.
+  if have direnv && { [[ -e "$target/.envrc" ]] || git -C "$target" ls-files 2>/dev/null | grep -qE '/\.envrc$'; }; then
+    ran=1
+    run_setup_direnv "$target"
   fi
   if (( ran == 0 )); then info "$(dim "→ auto-setup: nothing to do (no lockfile/.envrc in worktree)")"; fi
   return 0
+}
+
+_bootstrap_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
+_bootstrap_port_file_marked() { [[ -f "$1" ]] && IFS= read -r _line < "$1" && [[ "$_line" == "# generated by wt bootstrap; safe to delete" ]]; }
+write_bootstrap_ports() {
+  local repo="$1" target="$2" id="$3" config strategy output rec kind name base span file tmp input hash offset port wrote=0
+  config=$(cfg_bootstrap_ports "$repo")
+  [[ -z "$config" ]] && return 0
+  while IFS= read -r rec; do
+    IFS=$'\034' read -r kind strategy output _ <<< "$rec"
+    [[ "$kind" == "config" ]] && break
+  done <<< "$config"
+  [[ -z "$strategy" ]] && strategy="deterministic-hash"
+  [[ -z "$output" ]] && output=".wt/ports.env"
+  if [[ "$strategy" != "deterministic-hash" ]]; then warn "bootstrap ports: unsupported strategy '$strategy'"; return 0; fi
+  if ! _bootstrap_safe_relpath "$output"; then warn "bootstrap ports: refusing unsafe output path: $output"; return 0; fi
+  file="$target/$output"
+  if [[ -e "$file" ]] && ! _bootstrap_port_file_marked "$file"; then
+    warn "bootstrap ports: existing unmarked file, skipped: $output"
+    return 0
+  fi
+  mkdir -p "$(dirname "$file")"
+  tmp=$(mktemp)
+  printf '# generated by wt bootstrap; safe to delete\n' > "$tmp"
+  while IFS= read -r rec; do
+    IFS=$'\034' read -r kind name base span <<< "$rec"
+    [[ "$kind" == "var" ]] || continue
+    if [[ ! "$name" =~ ^[A-Z_][A-Z0-9_]*$ ]]; then warn "bootstrap ports: invalid variable name: $name"; continue; fi
+    if ! _bootstrap_int "$base" || ! _bootstrap_int "$span"; then warn "bootstrap ports: invalid base/span for $name"; continue; fi
+    if (( base < 1 || base > 65535 || span < 1 || base + span - 1 > 65535 )); then warn "bootstrap ports: invalid range for $name"; continue; fi
+    input="$repo:$id:$name"
+    hash=$(printf '%s' "$input" | cksum)
+    hash="${hash%% *}"
+    offset=$((hash % span))
+    port=$((base + offset))
+    printf 'export %s=%s\n' "$name" "$port" >> "$tmp"
+    wrote=1
+  done <<< "$config"
+  mv "$tmp" "$file"
+  (( wrote == 1 )) && info "$(dim "→ wrote bootstrap ports $output")"
+  return 0
+}
+
+run_bootstrap_post_create() {
+  local repo="$1" target="$2" item rc
+  while IFS= read -r item; do
+    [[ -z "$item" ]] && continue
+    if [[ "$item" == "auto" ]]; then run_setup_auto "$target"; continue; fi
+    rc=0
+    info "$(dim "→ running bootstrap post_create in $target")"
+    ( cd "$target" && bash -c "$item" ) || rc=$?
+    if (( rc != 0 )); then warn "bootstrap post_create failed (exit $rc); worktree left in place"; fi
+  done < <(cfg_bootstrap_post_create "$repo")
+  return 0
+}
+run_bootstrap() {
+  local repo="$1" canonical="$2" target="$3" branch="$4" id="$5" direnv_mode
+  link_bootstrap_env_symlinks "$repo" "$canonical" "$target"
+  link_bootstrap_linked_dirs "$repo" "$canonical" "$target"
+  write_bootstrap_ports "$repo" "$target" "$id"
+  direnv_mode=$(cfg_bootstrap_direnv "$repo")
+  if [[ "$direnv_mode" == "auto" || "$direnv_mode" == "true" ]]; then
+    run_setup_direnv "$target"
+  elif [[ -n "$direnv_mode" && "$direnv_mode" != "false" ]]; then
+    warn "bootstrap env.direnv: unsupported value '$direnv_mode'"
+  fi
+  if cfg_bootstrap_has_structured_post_create "$repo"; then
+    run_bootstrap_post_create "$repo" "$target"
+  else
+    run_setup_command "$repo" "$target"
+  fi
+  return 0
+}
+
+bootstrap_check_link_exists() {
+  local canonical="$1" wt="$2" path="$3"
+  [[ -L "$wt/$path" ]]
+}
+bootstrap_check_source_exists() {
+  local canonical="$1" path="$2"
+  [[ -e "$canonical/$path" ]]
+}
+bootstrap_check_link_points_to_source() {
+  local canonical="$1" wt="$2" path="$3"
+  _bootstrap_link_expected "$wt/$path" "$canonical/$path"
+}
+bootstrap_check_drift() {
+  local canonical="$1" wt="$2" drift_file="$3"
+  if [[ -e "$canonical/$drift_file" && -e "$wt/$drift_file" ]]; then
+    cmp -s "$canonical/$drift_file" "$wt/$drift_file"
+  else
+    [[ ! -e "$canonical/$drift_file" && ! -e "$wt/$drift_file" ]]
+  fi
+}
+bootstrap_check_required_paths() {
+  local canonical="$1" linked_path="$2" required_path="$3"
+  [[ -e "$canonical/$linked_path/$required_path" ]]
+}
+bootstrap_check_canonical_stale() {
+  local canonical="$1" linked_path="$2" drift_file="$3" required_path="$4" src dep
+  src="$canonical/$linked_path"
+  dep="$canonical/$linked_path/$required_path"
+  [[ -e "$canonical/$drift_file" && -e "$src" ]] || return 1
+  [[ "$canonical/$drift_file" -nt "$src" ]] && return 0
+  [[ -n "$required_path" && -e "$dep" && "$canonical/$drift_file" -nt "$dep" ]] && return 0
+  return 1
+}
+bootstrap_health_report() {
+  local repo="$1" canonical="$2" wt="$3" check_mode="${4:-doctor}" rec path source drift_files required_paths drift required missing any=0 warn_count=0 stale=0
+  while IFS= read -r rec; do
+    [[ -z "$rec" ]] && continue
+    any=1
+    IFS=$'\034' read -r path source drift_files required_paths <<< "$rec"
+    if [[ -z "$path" ]]; then continue; fi
+    if [[ "$source" != "canonical" ]]; then
+      printf '%-40s' "linked $path"; yellow "WARN (unsupported source: $source)\n"; warn_count=$((warn_count + 1)); continue
+    fi
+    printf '%-40s' "linked $path"
+    if bootstrap_check_link_points_to_source "$canonical" "$wt" "$path"; then green "PASS\n"; else yellow "WARN (missing/not expected symlink)\n"; warn_count=$((warn_count + 1)); fi
+    printf '%-40s' "source $path"
+    if bootstrap_check_source_exists "$canonical" "$path"; then green "PASS\n"; else yellow "WARN (canonical deps missing)\n"; warn_count=$((warn_count + 1)); fi
+    while IFS= read -r drift; do
+      [[ -z "$drift" ]] && continue
+      printf '%-40s' "drift $drift"
+      if bootstrap_check_drift "$canonical" "$wt" "$drift"; then green "PASS\n"; else yellow "WARN (differs from canonical)\n"; warn_count=$((warn_count + 1)); fi
+    done < <(_cfg_record_field_lines "$drift_files")
+    missing=""; stale=0
+    while IFS= read -r required; do
+      [[ -z "$required" ]] && continue
+      if ! bootstrap_check_required_paths "$canonical" "$path" "$required"; then missing+="${missing:+, }$required"; fi
+      while IFS= read -r drift; do
+        [[ -z "$drift" ]] && continue
+        bootstrap_check_canonical_stale "$canonical" "$path" "$drift" "$required" && stale=1
+      done < <(_cfg_record_field_lines "$drift_files")
+    done < <(_cfg_record_field_lines "$required_paths")
+    if [[ -n "$required_paths" ]]; then
+      printf '%-40s' "deps $path"
+      if [[ -n "$missing" ]]; then yellow "WARN (missing: $missing)\n"; warn_count=$((warn_count + 1)); elif (( stale == 1 )); then yellow "WARN (canonical deps may be stale)\n"; else green "PASS\n"; fi
+    fi
+  done < <(cfg_bootstrap_linked_dirs "$repo")
+  if (( any == 0 )); then
+    local links_any=0 relpath
+    while IFS= read -r relpath; do
+      [[ -z "$relpath" ]] && continue
+      links_any=1
+      printf '%-40s' "symlink $relpath"
+      if [[ -e "$wt/$relpath" ]]; then green "PASS\n"; else yellow "WARN (missing/dangling)\n"; warn_count=$((warn_count + 1)); fi
+    done < <(cfg_worktree_symlinks "$repo")
+    if (( links_any == 0 )); then printf '%-40s' "worktree_symlinks"; dim "INFO (none configured)\n"; fi
+  fi
+  return "$warn_count"
 }
 
 is_clean() {
@@ -1050,21 +1457,7 @@ cmd_doctor_worktree() {
   canonical=$(cfg_repo_get "$repo" path)
   printf '%s\n' "$(green "[$repo] worktree $id") $wt"
 
-  local links_any=0 relpath
-  while IFS= read -r relpath; do
-    [[ -z "$relpath" ]] && continue
-    links_any=1
-    printf '%-40s' "symlink $relpath"
-    if [[ -e "$wt/$relpath" ]]; then green "PASS\n"; else yellow "WARN (missing/dangling)\n"; fi
-  done < <(cfg_worktree_symlinks "$repo")
-  if (( links_any == 0 )); then printf '%-40s' "worktree_symlinks"; dim "INFO (none configured)\n"; fi
-
-  printf '%-40s' "node_modules"
-  if [[ -f "$wt/package.json" ]]; then
-    if [[ -d "$wt/node_modules" ]]; then green "PASS\n"; else yellow "WARN (missing; run install)\n"; fi
-  else
-    dim "INFO (no root package.json)\n"
-  fi
+  bootstrap_health_report "$repo" "$canonical" "$wt" doctor || true
 
   printf '%-40s' ".venv"
   if [[ -d "$wt/.venv" ]]; then green "PASS\n"; else dim "INFO (absent)\n"; fi
@@ -1090,6 +1483,27 @@ cmd_doctor_worktree() {
   return 0
 }
 
+cmd_bootstrap() {
+  local mode="repair" id="" record repo wt _id r_rp_path branch _sha _is_canonical canonical
+  while (($#)); do
+    case "$1" in
+      --check) mode="check"; shift ;;
+      --repair) mode="repair"; shift ;;
+      -*) die 10 "unknown flag: $1" ;;
+      *) [[ -z "$id" ]] && id="$1" || die 10 "unexpected positional: $1"; shift ;;
+    esac
+  done
+  [[ -n "$id" ]] || die 10 "usage: wt bootstrap [--check|--repair] <id>"
+  record=$(wt_resolve_id "$id") || die 20 "no worktree '$id' in any configured repo"
+  wt_record_fields "$record" repo _id wt r_rp_path branch _sha _is_canonical
+  canonical=$(cfg_repo_get "$repo" path)
+  if [[ "$mode" == "check" ]]; then
+    printf '%s\n' "$(green "[$repo] bootstrap check $id") $wt"
+    bootstrap_health_report "$repo" "$canonical" "$wt" check
+    return $?
+  fi
+  run_bootstrap "$repo" "$canonical" "$wt" "$branch" "$_id"
+}
 generate_path_cache() {
   local record repo path wt_root tmp rp_path rp_wt_root rp_forbidden _base _default _workspace
   tmp=$(mktemp)
@@ -1216,8 +1630,7 @@ cmd_new() {
   # into the new worktree. Compatible with Claude Code and VS Code's convention.
   # Only gitignored files are copied — tracked files are never duplicated.
   copy_worktreeinclude_files "$canonical" "$target"
-  link_worktree_symlinks "$repo" "$canonical" "$target"
-  run_setup_command "$repo" "$target"
+  run_bootstrap "$repo" "$canonical" "$target" "$branch" "$id"
 
 
   green "created "
@@ -2043,6 +2456,7 @@ wt $WT_VERSION — worktree CLI
   wt audit [--no-fetch]        list unmerged worktree branches (TSV, machine-readable)
   wt repair                    reconcile drift (missing tabs, orphan tabs, stale locks)
   wt doctor [--install-hooks]  self-check; --install-hooks (re)writes the path cache
+  wt bootstrap [--check|--repair] <id> run/check configured worktree bootstrap
   wt onboard [<path>] [--name <n>] [--yes]  add a git repo to ~/.config/wt/config.yaml (defaults to \$PWD)
   wt version [--latest]        print version; --latest checks upstream
   wt upgrade                   git pull in the install dir + re-symlink
@@ -2391,6 +2805,7 @@ main() {
     audit) cmd_audit "$@" ;;
     repair) cmd_repair "$@" ;;
     doctor) cmd_doctor "$@" ;;
+    bootstrap) cmd_bootstrap "$@" ;;
     onboard) cmd_onboard "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     version) cmd_version "$@" ;;

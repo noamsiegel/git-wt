@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — bootstrap linked dirs
+
+### Added
+- Structured `bootstrap` config for per-repo env symlinks, linked dependency dirs, generated per-worktree ports, direnv handling, and post-create commands. `wt new` now runs bootstrap automatically after `.worktreeinclude`, and `wt bootstrap [--check|--repair] <id>` can check or repair existing worktrees.
+- `wt doctor --worktree` now reports bootstrap linked-dir health: symlink target, canonical source, drift files, required dependency paths, and canonical stale dependency hints.
+
+### Changed
+- Legacy `worktree_symlinks` and `setup_command` remain compatible bootstrap aliases. Linked dependency dirs are symlinked only; `node_modules` is never copied.
+
 ## [v0.10.9] — issue-key branch guard
 
 ### Added

@@ -90,6 +90,8 @@ wt move noam/AUTH-123-add-sso    # relocate uncommitted canonical work to a new 
 wt reap AUTH-123                  # clean up worktree, remove branch
 wt doctor                         # diagnose setup, dependencies, hook wiring
 wt doctor --worktree AUTH-123     # per-worktree health: env symlinks, deps, hooks, prunable
+wt bootstrap --check AUTH-123 # read-only bootstrap health rows
+wt bootstrap --repair AUTH-123 # recreate configured symlinks/ports
 wt install-hooks                  # restore the wt guard in a repo whose local core.hooksPath bypasses it
 wt uninstall-hooks                # revert install-hooks (restore original core.hooksPath)
 wt upgrade                        # git pull in the install dir
@@ -159,37 +161,79 @@ Example `.worktreeinclude`:
 
 Patterns support `*`, `?`, `**`. Comments start with `#`.
 
-## Worktree bootstrap (`worktree_symlinks`, `setup_command`)
+## Worktree bootstrap (`bootstrap.*`)
 
-Beyond copying (`.worktreeinclude`), `wt new` can **symlink** gitignored files
-and run a **setup command** so a fresh worktree is immediately usable:
+`wt new` copies `.worktreeinclude` first, then runs structured bootstrap for
+the new worktree:
 
 ```yaml
 repos:
   my-monorepo:
-    worktree_symlinks:        # live-linked from the canonical checkout
-      - .env.local
-    setup_command: "direnv allow && yarn install"
+    bootstrap:
+      env:
+        symlinks:
+          - .env.local
+          - .envrc-personal
+        direnv: auto
+      linked_dirs:
+        - path: apps/web/node_modules
+          source: canonical
+          drift_files:
+            - apps/web/package.json
+            - apps/web/yarn.lock
+          required_paths:
+            - .bin/vitest
+            - .bin/tsc
+      ports:
+        strategy: deterministic-hash
+        output: .wt/ports.env
+        variables:
+          WEB_PORT:
+            base: 17000
+            span: 1000
+      post_create:
+        - auto
 ```
 
-- `worktree_symlinks` links each listed path into the new worktree (skips files
-  that already exist; warns on a missing source; refuses `..`/absolute paths).
-- `setup_command` runs once in the new worktree, best-effort (a failure warns,
-  never fails `wt new`). Set it to `auto` to detect the toolchain from lockfiles
-  at the worktree root and run the matching cache-backed installer
-  (`uv.lock`→`uv sync`, `bun.lock(b)`→`bun install`, `pnpm-lock.yaml`→`pnpm
-  install`, `yarn.lock`→`yarn install`, `package-lock.json`→`npm ci`), then
-  `direnv allow` if an `.envrc` is present. `auto` is most useful in `defaults:`
-  so every repo provisions itself with no per-repo command.
+- `bootstrap.env.symlinks` live-links small gitignored env files from the
+  canonical checkout into each worktree.
+- `bootstrap.linked_dirs` live-links heavy dependency directories from the
+  canonical checkout. They are symlink-only, never copied. Put
+  `node_modules` here, not in `.worktreeinclude`.
+- `.worktreeinclude` remains copy-only for small ignored files each worktree
+  should own independently.
+- `bootstrap.env.direnv: auto` runs direnv authorization for the root `.envrc`
+  and tracked nested `.envrc` files. `true` authorizes root `.envrc`; `false`
+  disables structured direnv handling.
+- `bootstrap.ports` writes generated per-worktree exports to `.wt/ports.env`
+  by default. Projects must source that file from `.envrc` or
+  `.envrc-personal` before shell commands see the variables.
+- `bootstrap.post_create` runs best-effort commands after links and ports.
+  Item `auto` reuses the lockfile-aware setup behavior.
+- Legacy `worktree_symlinks` and `setup_command` still work as compatible
+  aliases when structured bootstrap keys are absent.
 
-See [`docs/CONFIG.md`](./docs/CONFIG.md#worktree-bootstrap) for details.
+Existing worktrees can rerun the idempotent bootstrap:
+
+```bash
+wt bootstrap <id>          # repair/recreate configured symlinks and ports
+wt bootstrap --check <id>  # read-only health check; non-zero on warnings
+wt bootstrap --repair <id> # explicit repair alias
+```
+
+See [`docs/CONFIG.md`](./docs/CONFIG.md#worktree-bootstrap) details.
 
 ## Inspecting worktree health
 
 - `wt doctor --worktree <id>` reports per-worktree health: configured
-  `worktree_symlinks` present/dangling, `node_modules` when a root
-  `package.json` exists, `.venv`, direnv `.envrc`, the effective
-  `core.hooksPath`, and prunable worktree metadata.
+  bootstrap env symlinks, linked dependency dirs, canonical sources,
+  lockfile drift, required dependency paths, `.venv`, direnv `.envrc`,
+  effective `core.hooksPath`, prunable worktree metadata.
+- For each `bootstrap.linked_dirs` entry, expect `linked <path>` PASS when
+  the worktree symlink points at canonical source; `source <path>` WARN when
+  canonical dependency dir missing; `drift <file>` WARN when canonical and
+  worktree lockfiles/manifests differ; `deps <path>` WARN when required
+  canonical dependency paths such as `.bin/vitest` are absent.
 - `wt doctor` flags any registered worktree living under a `forbidden_roots`
   path as `WARN (external: N)` — e.g. worktrees created by an agent isolation
   system. It stays a warning, not a hard failure.
