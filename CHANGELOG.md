@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] — bootstrap linked dirs
+## [v0.10.10] — bootstrap linked dirs
 
 ### Added
 - Structured `bootstrap` config for per-repo env symlinks, linked dependency dirs, generated per-worktree ports, direnv handling, and post-create commands. `wt new` now runs bootstrap automatically after `.worktreeinclude`, and `wt bootstrap [--check|--repair] <id>` can check or repair existing worktrees.
