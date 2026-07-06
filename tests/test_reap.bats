@@ -98,3 +98,31 @@ teardown() { wt_test_teardown; }
   run wt reap --force ABC-1-lsof-clean
   [ "$status" -eq 0 ]
 }
+
+@test "reap deletes the merged remote branch along with the local one" {
+  wt_quick_new dev/ABC-7-remote
+  git -C "$FIX/wt_root/ABC-7-remote" push --quiet -u origin dev/ABC-7-remote
+  run wt reap ABC-7-remote
+  [ "$status" -eq 0 ]
+  run git -C "$FIX/canonical" ls-remote --exit-code origin refs/heads/dev/ABC-7-remote
+  [ "$status" -ne 0 ]
+}
+
+@test "reap --force never deletes an unmerged remote branch" {
+  wt_quick_new dev/ABC-8-unmerged
+  git -C "$FIX/wt_root/ABC-8-unmerged" commit --quiet --allow-empty -m wip
+  git -C "$FIX/wt_root/ABC-8-unmerged" push --quiet -u origin dev/ABC-8-unmerged
+  run wt reap --force ABC-8-unmerged
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not deleting"* ]]
+  run git -C "$FIX/canonical" ls-remote --exit-code origin refs/heads/dev/ABC-8-unmerged
+  [ "$status" -eq 0 ]
+}
+
+@test "reap --force handles a never-pushed branch without touching the remote" {
+  wt_quick_new dev/ABC-9-local-only
+  run wt reap --force ABC-9-local-only
+  [ "$status" -eq 0 ]
+  run git -C "$FIX/canonical" ls-remote --exit-code origin refs/heads/dev/ABC-9-local-only
+  [ "$status" -ne 0 ]
+}

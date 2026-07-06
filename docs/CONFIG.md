@@ -89,6 +89,7 @@ Defaults are inherited by every repo unless the repo overrides the field.
 | `protected_refs` | string array | empty | no | Exact names or regexes consumed by the guardrails personal hook layer when running in a wt-managed repo. git-wt core stores this in config but does not enforce protected refs itself. |
 | `worktree_symlinks` | string array | empty | no | Legacy alias for `bootstrap.env.symlinks` when structured env symlinks absent. Repo list replaces defaults (no merge). |
 | `setup_command` | string | none | no | Legacy alias for `bootstrap.post_create` when structured post-create absent. `auto` keeps lockfile-aware setup behavior. |
+| `hooks.autopush` | boolean-ish string | `true` | no | Whether the post-commit hook auto-pushes worktree branches for repos inheriting this default. Only the literal `false` disables. Serialized to `WT_CACHE` as `WT_AUTOPUSH_<repo>`. |
 
 ## `repos.<name>` fields
 
@@ -107,6 +108,7 @@ Each entry under `repos:` declares one canonical checkout.
 | `setup_command` | string | no | yes | Legacy post-create command. Used only when `bootstrap.post_create` absent. |
 | `branch_issue_key_regex` | string | no | yes | Bash ERE extracting issue key from branch. First capture group wins; whole match fallback. Empty disables duplicate issue-key guard. |
 | `enforce_unique_issue_keys` | boolean-ish string | no | yes | Opt-in duplicate issue-key worktree guard for `wt new`, `wt move`, `wt adopt`. |
+| `hooks.autopush` | boolean-ish string | no | yes | Per-repo autopush off-switch. Set `false` for repos whose worktree branches are ephemeral staging (e.g. direct-main repos) so autopush stops leaking them to origin. Only the literal `false` disables; anything else stays on (autopush is the safety default). Serialized as `WT_AUTOPUSH_<repo>` in the path cache. |
 
 Repo keys should be stable and shell-friendly: lowercase letters, digits, `_`, and `-` are safest. `wt onboard` sanitizes proposed names by lowercasing and replacing unsupported characters with `-`.
 

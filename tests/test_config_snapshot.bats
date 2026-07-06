@@ -143,3 +143,28 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$output" = "touch SETUP_RAN" ]
 }
+
+@test "path cache emits WT_AUTOPUSH=true per repo by default" {
+  generate_path_cache
+  grep -q '^WT_AUTOPUSH_fixrepo=true$' "$WT_CACHE"
+  grep -q '^WT_AUTOPUSH_fixrepo2=true$' "$WT_CACHE"
+}
+
+@test "repos.<name>.hooks.autopush=false flows into the path cache" {
+  yq -i '.repos.fixrepo2.hooks.autopush = false' "$WT_CONFIG"
+  cfg_reload
+
+  generate_path_cache
+  grep -q '^WT_AUTOPUSH_fixrepo=true$' "$WT_CACHE"
+  grep -q '^WT_AUTOPUSH_fixrepo2=false$' "$WT_CACHE"
+}
+
+@test "defaults.hooks.autopush=false applies to every repo; explicit repo true overrides" {
+  yq -i '.defaults.hooks.autopush = false' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.hooks.autopush = true' "$WT_CONFIG"
+  cfg_reload
+
+  generate_path_cache
+  grep -q '^WT_AUTOPUSH_fixrepo=true$' "$WT_CACHE"
+  grep -q '^WT_AUTOPUSH_fixrepo2=false$' "$WT_CACHE"
+}

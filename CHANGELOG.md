@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.10.11] — per-repo autopush policy
+
+### Added
+- Per-repo autopush policy: `repos.<name>.hooks.autopush: false` (or `defaults.hooks.autopush`) durably disables post-commit autopush for a repo. Serialized to the path cache as `WT_AUTOPUSH_<repo>` for the hook layer. Motivation: direct-main repos create only ephemeral staging branches, and autopush was leaking every one of them to origin as a stale remote branch.
+- `wt reap` now also deletes the (auto)pushed remote branch — but only when its tip is already reachable from `origin/<default_branch>`. Unmerged remote branches are kept with a warning; reap never destroys the only copy of unmerged work.
+
+### Fixed
+- `_cfg_repo_field_value` expanded `$repo.$field` in the same `local` statement that assigned them, resolving against the caller's scope (correct only by dynamic-scoping coincidence, and an unbound-variable crash under `set -u` for callers without those locals). Assignments now bind before use.
+
 ## [v0.10.10] — bootstrap linked dirs
 
 ### Added

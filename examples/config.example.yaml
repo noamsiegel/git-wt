@@ -38,6 +38,16 @@ hooks:
   # Whether `wt pre-push` enforces branch_patterns. Opt-in.
   enforce_branch_names: false
 
+# Per-repo (or defaults-level) autopush policy. Autopush is ON by default —
+# worktree branches must not exist only on local disk. Set `false` on repos
+# whose worktree branches are ephemeral staging (direct-main repos), where
+# autopush would only leak stale branches to origin:
+#
+# repos:
+#   my-direct-main-repo:
+#     hooks:
+#       autopush: false
+
 repos:
   example-monorepo:
     path: ~/code/example-monorepo

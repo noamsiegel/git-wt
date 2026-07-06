@@ -226,7 +226,11 @@ _cfg_load() {
 }
 cfg_repos() { _cfg_load; printf '%s' "$_CFG_REPOS_LIST"; }
 _cfg_repo_field_value() {
-  local repo="$1" field="$2" v="${_CFG_REPO_FIELDS[$repo.$field]:-}"
+  # Assign before use: in a single `local a="$1" v="${arr[$a]}"` bash expands
+  # every word before any assignment binds, so $a would resolve to the OUTER
+  # scope (unbound under set -u; silently wrong when a global `repo` exists).
+  local repo="$1" field="$2" v
+  v="${_CFG_REPO_FIELDS[$repo.$field]:-}"
   if [[ -z "$v" ]]; then
     v="${_CFG_REPO_FIELDS[__defaults__.$field]:-}"
   fi
@@ -390,6 +394,15 @@ cfg_bootstrap_ports() {
 cfg_forbidden() { _cfg_load; printf '%s' "$_CFG_FORBIDDEN_LIST"; }
 cfg_max_branch_len() { _cfg_load; echo "$_CFG_MAX_LEN"; }
 cfg_hook_enforce_branch_names() { _cfg_load; echo "$_CFG_HOOK_ENFORCE_BRANCH_NAMES"; }
+# Per-repo autopush policy: repos.<name>.hooks.autopush, falling back to
+# defaults.hooks.autopush, defaulting to on. Only the literal string "false"
+# disables — autopush is the safety default (work must not exist only on
+# local disk), so an unset/typo'd value stays on.
+cfg_repo_autopush() {
+  _cfg_load
+  local v; v=$(_cfg_repo_field_value "$1" "hooks.autopush")
+  [[ "$v" == "false" ]] && echo "false" || echo "true"
+}
 cfg_branch_issue_key_regex() {
  _cfg_load
  local regex="${_CFG_ISSUE_KEY_REGEX[$1]:-}"
@@ -1565,6 +1578,7 @@ EOF
       printf 'WT_PATTERNS_%s=(\n' "${repo//[^a-zA-Z0-9_]/_}"
       branch_policy_emit_cache "$repo"
       printf ')\n'
+      printf 'WT_AUTOPUSH_%s=%s\n' "${repo//[^a-zA-Z0-9_]/_}" "$(cfg_repo_autopush "$repo")"
     done < <(cfg_each_repo_record)
   } > "$tmp"
   mv "$tmp" "$WT_CACHE"
@@ -1997,6 +2011,20 @@ cmd_reap() {
         warn "branch '$branch' has commits not in origin/$default_branch; not deleting"
       else
         git_in "$canonical" branch -D "$branch" >/dev/null 2>&1 || warn "branch -D failed for $branch"
+        # 3. delete the (auto)pushed remote branch too, but only when its tip
+        # is already reachable from origin/<default> — reap must never destroy
+        # the only copy of unmerged work. Without this, autopushed remotes
+        # outlive every reap and accumulate as stale branches on origin.
+        local remote_sha
+        remote_sha=$(git_in "$canonical" ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+        if [[ -n "$remote_sha" ]]; then
+          if git_in "$canonical" merge-base --is-ancestor "$remote_sha" "origin/$default_branch" 2>/dev/null; then
+            git_in "$canonical" push --no-verify origin --delete "$branch" >/dev/null 2>&1 \
+              || warn "could not delete remote branch origin/$branch"
+          else
+            warn "remote branch origin/$branch not fully merged; keeping"
+          fi
+        fi
       fi
     fi
     release_lock
