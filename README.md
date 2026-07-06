@@ -341,6 +341,7 @@ plugin, worktree commands still work; tab-only commands (`focus`, `close-tab`,
 | Commit in canonical (advisory only) | `git commit --no-verify` |
 | Skip autopush for this commit | `WT_NO_AUTOPUSH=1 git commit ...` |
 | Skip autopush's branch-guard pre-check | `WT_NO_AUTOPUSH_BRANCH_GUARD=1 git commit ...` |
+| Turn autopush off durably for one repo | `repos.<name>.hooks.autopush: false` (for direct-main repos whose worktree branches are ephemeral staging) |
 | Allow pushing branch not matching pattern | `WT_HOOK_ENFORCE_BRANCH_NAMES=false` (per-shell) or `git push --no-verify` |
 | Uninstall completely | `git config --global --unset core.hooksPath` and remove the directory |
 
