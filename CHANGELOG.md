@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.10.11] — per-repo autopush policy
 
 ### Added
 - Per-repo autopush policy: `repos.<name>.hooks.autopush: false` (or `defaults.hooks.autopush`) durably disables post-commit autopush for a repo. Serialized to the path cache as `WT_AUTOPUSH_<repo>` for the hook layer. Motivation: direct-main repos create only ephemeral staging branches, and autopush was leaking every one of them to origin as a stale remote branch.
