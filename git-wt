@@ -7,7 +7,7 @@ IFS=$'\n\t'
 
 WT_CONFIG=${WT_CONFIG:-$HOME/.config/wt/config.yaml}
 WT_CACHE=${WT_CACHE:-$HOME/.config/wt/paths.cache}
-WT_VERSION="0.10.11"
+WT_VERSION="0.10.12"
 
 # Plugin system (v0.3.0+). Plugins are executables named `wt-<name>` installed
 # under WT_PLUGIN_DIR. Active set tracked in WT_PLUGIN_CONFIG. See
@@ -2196,11 +2196,6 @@ cmd_onboard() {
   fi
   [[ -z "$default_branch" ]] && default_branch="main"
 
-  # Detect team-managed core.hooksPath override.
-  local local_hookspath
-  local_hookspath=$(git -C "$canonical" config --local --get core.hooksPath 2>/dev/null || true)
-  # Don't warn if the local hooksPath equals wt's own default (wt-managed, not team-managed).
-  if [[ "$local_hookspath" == "$HOME/.config/git/hooks" ]]; then local_hookspath=""; fi
 
   local parent worktree_root
   local default_config_branch default_config_root default_config_workspace
@@ -2219,14 +2214,6 @@ default_config_workspace=$(cfg_repo_get "$safe_name" he""rdr_workspace)
   he""rdr_workspace: $default_config_workspace
   branch_patterns: inherited from defaults
 EOF
-  if [[ -n "$local_hookspath" ]]; then
-    cat >&2 <<EOF
-
-  $(yellow NOTE:) local core.hooksPath = '$local_hookspath' (team-managed).
-  wt will respect this. Push-time/commit-time hook enforcement will NOT apply
-  in this repo, but CLI commands (wt new, adopt, reap, etc.) will work.
-EOF
-  fi
 
   if (( yes == 0 )); then
     printf '\n[wt onboard] proceed? [y/N] ' >&2
@@ -2245,6 +2232,7 @@ EOF
   cfg_reload
   # Regenerate path cache so hooks/prompt pick up the new repo.
   generate_path_cache
+  cmd_install_hooks --repo "$safe_name"
   green "added "
   printf 'repo=%s path=%s\n' "$safe_name" "$canonical"
 }
@@ -2606,17 +2594,17 @@ cmd_hook_run() {
       local gd cd top repo cpath
       gd=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 0
       cd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
-      [[ "$gd" == "$cd" ]] || exit 0   # in a worktree → allow
+      [[ "$gd" == "$cd" ]] || exit 0   # in a worktree -> allow
       top=$(rp "$(dirname "$cd")")
       for repo in $(cfg_repos 2>/dev/null); do
         cpath=$(rp "$(cfg_repo_get "$repo" path 2>/dev/null)")
         if [[ "$cpath" == "$top" ]]; then
-          printf '\n%b\n' "$(red '═══ wt: refusing to commit in canonical checkout ═══')" >&2
-          printf '  repo: %s\n  path: %s\n' "$repo" "$top" >&2
-          printf '\n  canonical is read-only — work belongs in a worktree.\n' >&2
-          printf '  fix:  wt adopt $(git rev-parse --abbrev-ref HEAD)\n' >&2
-          printf '  or:   wt new <branch>\n' >&2
-          printf '\n  emergency bypass: git commit --no-verify\n\n' >&2
+          printf '\n%b\n' "$(red '=== wt: refusing to commit in canonical checkout ===')" >&2
+          printf ' repo: %s\n path: %s\n' "$repo" "$top" >&2
+          printf '\n canonical is read-only - work belongs in a worktree.\n' >&2
+          printf ' fix: wt adopt %s\n' "$(git rev-parse --abbrev-ref HEAD)" >&2
+          printf ' or: wt new <branch>\n' >&2
+          printf '\n emergency bypass: git commit --no-verify\n\n' >&2
           exit 1
         fi
       done
@@ -2647,6 +2635,35 @@ cmd_hook_run() {
       done
       (( fail == 0 )) || exit 1
       exit 0
+      ;;
+    post-checkout)
+      [[ "${3:-}" == "1" ]] || exit 0
+      [[ -z "${WT_POST_CHECKOUT_RESTORE:-}" ]] || exit 0
+
+      local gd cd top repo r cpath default_branch current_branch
+      gd=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 0
+      cd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+      [[ "$gd" == "$cd" ]] || exit 0
+      top=$(rp "$(dirname "$cd")")
+      repo=""
+      for r in $(cfg_repos 2>/dev/null); do
+        cpath=$(rp "$(cfg_repo_get "$r" path 2>/dev/null)")
+        [[ "$cpath" == "$top" ]] && { repo="$r"; break; }
+      done
+      [[ -n "$repo" ]] || exit 0
+
+      default_branch=$(cfg_repo_get "$repo" default_branch 2>/dev/null) || exit 0
+      current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || exit 0
+      [[ "$current_branch" != "$default_branch" ]] || exit 0
+      if WT_POST_CHECKOUT_RESTORE=1 git switch --quiet "$default_branch"; then
+        printf "wt post-checkout: canonical checkout restored to '%s'; use 'wt new <branch>' or 'wt adopt %s' for work.\n" \
+          "$default_branch" "$current_branch" >&2
+      else
+        warn "post-checkout: could not restore canonical checkout to '$default_branch'; resolve checkout state, then run: git switch $default_branch"
+      fi
+      # The nested restore dispatches the team post-checkout hook for the
+      # actual final checkout. Stop the outer stale event to avoid a double run.
+      return 1
       ;;
     *) exit 0 ;;
   esac
@@ -2679,10 +2696,11 @@ cmd_install_hooks() {
   local disp="$HOME/.config/wt/repo-hooks/$repo"
   local cur orig
   cur=$(git_in "$canonical" config --local --get core.hooksPath 2>/dev/null || true)
-  if [[ "$cur" == "$disp" && -r "$disp/.wt-orig-hookspath" ]]; then
-    orig=$(cat "$disp/.wt-orig-hookspath")   # already installed: preserve the true original
+  if [[ "$cur" == "$disp" ]]; then
+    orig=""
+    [[ -r "$disp/.wt-orig-hookspath" ]] && orig=$(cat "$disp/.wt-orig-hookspath")
   else
-    orig="$cur"                               # may be empty (git default)
+    orig="$cur" # may be empty (git default)
   fi
 
   local orig_dir
@@ -2725,7 +2743,7 @@ DISP
   # Drop any stale hook symlinks from a previous install before regenerating.
   find "$disp" -maxdepth 1 -type l -delete 2>/dev/null || true
 
-  local names=(pre-commit pre-push) f n seen=" "
+  local names=(pre-commit pre-push post-checkout) f n seen=" "
   if [[ -d "$orig_dir" ]]; then
     for f in "$orig_dir"/*; do
       [[ -e "$f" ]] || continue

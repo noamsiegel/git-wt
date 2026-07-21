@@ -243,12 +243,12 @@ See [`docs/CONFIG.md`](./docs/CONFIG.md#worktree-bootstrap) details.
   canonical checkout. External (forbidden-root) worktrees are marked
   `(external)` in `list`/`status`; `wt cd` to one prints the path but warns.
 
-## Restoring the wt guard with `wt install-hooks`
+## Composing repo hooks
 
-Git's `core.hooksPath` is single-valued: if a repo sets a **local**
-`core.hooksPath` (a team-managed `.githooks`, husky, lefthook, etc.) it
-overrides wt's **global** hooks, so wt's canonical-commit guard never runs
-there. `wt install-hooks` fixes this without giving up the team hooks:
+`wt onboard` installs a per-repo dispatcher even when the repository already
+sets local `core.hooksPath` for team-managed hooks such as `.githooks`, Husky,
+or lefthook. The dispatcher preserves and chains that original hook target.
+`wt install-hooks` can reinstall it explicitly:
 
 ```bash
 wt install-hooks --repo monorepo   # or just run from inside the repo
@@ -257,11 +257,12 @@ wt install-hooks --repo monorepo   # or just run from inside the repo
 It points the repo's local `core.hooksPath` at a generated dispatcher
 (`~/.config/wt/repo-hooks/<repo>/`) whose hooks:
 
-1. run the wt guardrail (`wt hook-run`) — refuses commits in the canonical
-   checkout, and validates branch names on push when `hooks.enforce_branch_names`
-   is on;
-2. then chain the repo's original hooks (whatever `core.hooksPath` pointed at
-   before install).
+1. run wt guardrails: refuse commits in the canonical checkout, validate
+   branch names on push when `hooks.enforce_branch_names` is on, and restore
+   the canonical checkout to its configured default branch after a branch
+   checkout;
+2. chain the repo's original hooks (whatever `core.hooksPath` pointed to
+   before installation).
 
 The guard is **fail-open**: if wt is missing or broken, the dispatcher never
 blocks your commit. It is idempotent, and reversible at any time:
@@ -270,8 +271,8 @@ blocks your commit. It is idempotent, and reversible at any time:
 wt uninstall-hooks --repo monorepo
 ```
 
-`wt doctor` lists which repos have a local-`core.hooksPath` override, so you
-know where `install-hooks` is worth running.
+`wt doctor` reports whether each repo's effective hook path is the dispatcher
+and whether its original hook target is still chained.
 
 ### When `.envrc`/direnv manages `core.hooksPath`
 
