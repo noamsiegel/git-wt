@@ -2661,6 +2661,8 @@ cmd_hook_run() {
       else
         warn "post-checkout: could not restore canonical checkout to '$default_branch'; resolve checkout state, then run: git switch $default_branch"
       fi
+      # The nested restore dispatches the team post-checkout hook for the
+      # actual final checkout. Stop the outer stale event to avoid a double run.
       return 1
       ;;
     *) exit 0 ;;
