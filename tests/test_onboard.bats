@@ -71,7 +71,7 @@ _mk_new_repo() {
   [ "$(grep -c '^  same:' "$WT_CONFIG")" -eq 1 ]
 }
 
-@test "onboard: warns when repo has team-managed core.hooksPath but still adds to config" {
+@test "onboard: installs dispatcher when repo has team-managed core.hooksPath" {
   local repo
   repo=$(_mk_new_repo teamhooks)
   # Simulate husky/lefthook/.githooks setup
@@ -80,8 +80,8 @@ _mk_new_repo() {
 
   run wt onboard "$repo" --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"team-managed"* ]]
   grep -q '^  teamhooks:' "$WT_CONFIG"
+  [ "$(git -C "$repo" config --local core.hooksPath)" != ".githooks" ]
 }
 
 @test "onboard: --name override is sanitized and used" {
@@ -103,4 +103,33 @@ _mk_new_repo() {
   [ "$status" -eq 0 ]
   # Config should reference the canonical, not the worktree
   grep -A1 '^  wtree:' "$WT_CONFIG" | grep -q "$repo"
+}
+
+
+@test "onboard: composes team hooks while enabling wt dispatcher" {
+  local repo marker
+  repo=$(_mk_new_repo composed)
+  marker="$FIX/team-post-checkout"
+  mkdir -p "$repo/.githooks"
+  cat > "$repo/.githooks/post-checkout" <<HOOK
+#!/usr/bin/env bash
+echo "\$1 \$2 \$3" >> "$marker"
+HOOK
+  chmod +x "$repo/.githooks/post-checkout"
+  git -C "$repo" config core.hooksPath .githooks
+
+  run wt onboard "$repo" --yes
+
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$repo" config --local core.hooksPath)" != ".githooks" ]
+
+  cd "$repo"
+  run git switch -c feature/canonical-escape
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"canonical checkout restored"* ]]
+  [ "$(git branch --show-current)" = "main" ]
+  [[ "$output" == *"wt new"* ]]
+  [ -s "$marker" ]
+  grep -q ' 1$' "$marker"
 }

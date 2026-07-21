@@ -55,12 +55,16 @@ EOF
 
 # --- post-checkout -----------------------------------------------------
 
-@test "post-checkout: warns in canonical when off main" {
+@test "post-checkout: restores forbidden canonical branch checkout" {
   cd "$FIX/canonical"
-  git switch --quiet -c feature/foo
-  run "$HOME/.config/git/hooks/post-checkout" 0 0 1
-  [ "$status" -eq 0 ]   # advisory, never blocks
-  [[ "$output" == *"canonical checkout left main"* ]]
+  git -c core.hooksPath=/dev/null switch --quiet -c feature/canonical-escape
+
+  run wt hook-run post-checkout HEAD HEAD 1
+
+  [ "$status" -ne 0 ]
+  [ "$(git branch --show-current)" = "main" ]
+  [[ "$output" == *"canonical checkout restored"* ]]
+  [[ "$output" == *"wt new"* ]]
 }
 
 @test "post-checkout: silent in canonical when on main" {
@@ -191,4 +195,46 @@ EOF
   run "$HOME/.config/git/hooks/prepare-commit-msg" /tmp/wt-pcmsg-$$ message
   rm -f /tmp/wt-pcmsg-$$
   [ "$status" -eq 0 ]
+}
+
+# --- canonical checkout parking ----------------------------------------
+
+@test "post-checkout: leaves ordinary worktree branch checkout unchanged" {
+  wt_quick_new dev/ABC-1-first-branch
+  cd "$FIX/wt_root/ABC-1-first-branch"
+  git branch dev/ABC-2-second-branch
+  git -c core.hooksPath=/dev/null switch --quiet dev/ABC-2-second-branch
+
+  run wt hook-run post-checkout HEAD HEAD 1
+
+  [ "$status" -eq 0 ]
+  [ "$(git branch --show-current)" = "dev/ABC-2-second-branch" ]
+  [[ "$output" != *"canonical checkout restored"* ]]
+}
+
+@test "post-checkout: ignores file checkout in canonical checkout" {
+  cd "$FIX/canonical"
+  echo tracked > tracked.txt
+  git add tracked.txt
+  git commit --quiet --no-verify -m tracked
+  echo changed > tracked.txt
+  git -c core.hooksPath=/dev/null checkout -- tracked.txt
+
+  run wt hook-run post-checkout HEAD HEAD 0
+
+  [ "$status" -eq 0 ]
+  [ "$(git branch --show-current)" = "main" ]
+  [ "$(cat tracked.txt)" = "tracked" ]
+  [[ "$output" != *"canonical checkout restored"* ]]
+}
+
+@test "post-checkout: recursion guard skips nested restoration" {
+  cd "$FIX/canonical"
+  git -c core.hooksPath=/dev/null switch --quiet -c feature/nested-restore
+
+  WT_POST_CHECKOUT_RESTORE=1 run wt hook-run post-checkout HEAD HEAD 1
+
+  [ "$status" -eq 0 ]
+  [ "$(git branch --show-current)" = "feature/nested-restore" ]
+  [[ "$output" != *"canonical checkout restored"* ]]
 }
