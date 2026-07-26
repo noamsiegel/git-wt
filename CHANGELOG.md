@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] — single-session worktree ownership
+## [v0.11.0] — agent-session safety and honest bootstrap reporting
 
 ### Added
 - `wt hook-run pre-commit` now enforces one agent session per worktree. Git serialises
@@ -13,10 +13,39 @@ All notable changes to this project will be documented in this file.
   `--no-verify` bypass. The claim records a pid as well as a session id, so a crashed
   session's stale claim is taken over rather than locking the worktree permanently.
   Inert without `WT_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` in the environment, so humans are
-  unaffected, and fail-open like the rest of `hook-run`. Motivation: observed in the wild —
+  unaffected, and fail-open like the rest of `hook-run`. Motivation: observed in the wild -
   two agent sessions in one worktree, one of them pushing onto a branch that was already
   under review, discovered only because a diff contained a rename nobody in that session
   had written.
+
+### Fixed
+- `wt new` reported an uncreatable `worktree_root` as lock contention. `mkdir -p
+  "$wt_root"` was unchecked, so a permission-denied or read-only root fell through to the
+  lock `mkdir`, which then failed for an unrelated reason and was reported as
+  `worktree_root ... is locked by pid ?` against a lock that never existed. The `pid ?`
+  was the tell. Now: an uncreatable root says so, contention is only claimed when a lock
+  directory actually exists, a lock recording no pid is named as such, and a lock naming a
+  pid that is not running is reported as stale with a pointer to `wt repair`. Exit code
+  stays 40 throughout, so callers keying off the status are unaffected.
+- `wt bootstrap --check` could report a clean worktree while `--repair` would visibly
+  change it. Three causes, all in `bootstrap_health_report`:
+  - The symlink rows were only emitted when NO `bootstrap.linked_dirs` record was seen, so
+    a repo configuring both (linked `node_modules` plus `.envrc-personal`, the common
+    case) never had its symlinks checked at all.
+  - The check read `cfg_worktree_symlinks` while `run_bootstrap` provisions from
+    `cfg_bootstrap_env_symlinks`, so a repo using the current `bootstrap.env.symlinks` key
+    was never checked under any condition. The check now consults the same source as the
+    repair; a health check that disagrees with the repair about what should exist is worse
+    than no check.
+  - The `deps ... (canonical deps may be stale)` row printed a `WARN` without incrementing
+    `warn_count`, so a worktree whose only finding was that row exited 0. This was the
+    whole reason `--check` appeared to swallow its exit status; command dispatch was never
+    at fault. `README.md` already documented "non-zero on warnings" - the code, not the
+    docs, was wrong.
+
+  Motivation: a SessionStart hook keyed off `--check` to decide whether a worktree needed
+  provisioning and never fired, because a worktree missing every one of its env symlinks
+  reported clean.
 
 ## [v0.10.11] — per-repo autopush policy
 

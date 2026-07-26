@@ -1324,19 +1324,25 @@ bootstrap_health_report() {
     done < <(_cfg_record_field_lines "$required_paths")
     if [[ -n "$required_paths" ]]; then
       printf '%-40s' "deps $path"
-      if [[ -n "$missing" ]]; then yellow "WARN (missing: $missing)\n"; warn_count=$((warn_count + 1)); elif (( stale == 1 )); then yellow "WARN (canonical deps may be stale)\n"; else green "PASS\n"; fi
+      if [[ -n "$missing" ]]; then yellow "WARN (missing: $missing)\n"; warn_count=$((warn_count + 1)); elif (( stale == 1 )); then yellow "WARN (canonical deps may be stale)\n"; warn_count=$((warn_count + 1)); else green "PASS\n"; fi
     fi
   done < <(cfg_bootstrap_linked_dirs "$repo")
-  if (( any == 0 )); then
-    local links_any=0 relpath
-    while IFS= read -r relpath; do
-      [[ -z "$relpath" ]] && continue
-      links_any=1
-      printf '%-40s' "symlink $relpath"
-      if [[ -e "$wt/$relpath" ]]; then green "PASS\n"; else yellow "WARN (missing/dangling)\n"; warn_count=$((warn_count + 1)); fi
-    done < <(cfg_worktree_symlinks "$repo")
-    if (( links_any == 0 )); then printf '%-40s' "worktree_symlinks"; dim "INFO (none configured)\n"; fi
-  fi
+  # Symlinks are checked unconditionally, and against the SAME source run_bootstrap
+  # provisions from (cfg_bootstrap_env_symlinks, which prefers bootstrap.env.symlinks
+  # and falls back to the legacy worktree_symlinks key). Two bugs lived here: the loop
+  # was gated on "no linked_dirs were seen", so a repo configuring both never checked
+  # its symlinks at all; and it read cfg_worktree_symlinks, so a repo using
+  # bootstrap.env.symlinks was never checked under any condition. A health check that
+  # consults a different source than the repair can report clean on a worktree the
+  # repair would visibly change.
+  local links_any=0 relpath
+  while IFS= read -r relpath; do
+    [[ -z "$relpath" ]] && continue
+    links_any=1
+    printf '%-40s' "symlink $relpath"
+    if [[ -e "$wt/$relpath" ]]; then green "PASS\n"; else yellow "WARN (missing/dangling)\n"; warn_count=$((warn_count + 1)); fi
+  done < <(cfg_bootstrap_env_symlinks "$repo")
+  if (( links_any == 0 && any == 0 )); then printf '%-40s' "worktree_symlinks"; dim "INFO (none configured)\n"; fi
   return "$warn_count"
 }
 
