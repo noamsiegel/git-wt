@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.11.1] — stale canonical deps are INFO, not a finding
+
+### Fixed
+- `wt bootstrap --check` exited non-zero on a fully provisioned worktree. v0.11.0
+  started counting every printed `WARN`, which was right in general but wrong for
+  `deps ... (canonical deps may be stale)`: that row describes the CANONICAL
+  checkout's install being older than the lockfile, `--repair` cannot change it, and
+  it stays true until someone reinstalls there. Counting it made `--check`
+  permanently non-zero for every worktree of such a repo, destroying its use as a
+  "does this worktree need provisioning" gate — the exact purpose the v0.11.0 fix
+  was meant to enable. It is now reported as `INFO` and not counted, so `WARN` means
+  "this worktree diverges from its configured bootstrap" and nothing else.
+
 ## [v0.11.0] — agent-session safety and honest bootstrap reporting
 
 ### Added

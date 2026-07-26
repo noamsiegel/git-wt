@@ -1341,7 +1341,14 @@ bootstrap_health_report() {
     done < <(_cfg_record_field_lines "$required_paths")
     if [[ -n "$required_paths" ]]; then
       printf '%-40s' "deps $path"
-      if [[ -n "$missing" ]]; then yellow "WARN (missing: $missing)\n"; warn_count=$((warn_count + 1)); elif (( stale == 1 )); then yellow "WARN (canonical deps may be stale)\n"; warn_count=$((warn_count + 1)); else green "PASS\n"; fi
+      # Missing deps ARE a worktree finding and count. "Canonical deps may be stale"
+      # is not: it describes the canonical checkout's install being older than the
+      # lockfile, --repair cannot change it, and it is true indefinitely until
+      # someone reinstalls there. Counting it made --check permanently non-zero for
+      # every worktree of such a repo, which destroys its use as a "does this
+      # worktree need provisioning" gate. Reported as INFO so it stays visible
+      # without claiming this worktree diverges from its configured bootstrap.
+      if [[ -n "$missing" ]]; then yellow "WARN (missing: $missing)\n"; warn_count=$((warn_count + 1)); elif (( stale == 1 )); then dim "INFO (canonical deps may be stale)\n"; else green "PASS\n"; fi
     fi
   done < <(cfg_bootstrap_linked_dirs "$repo")
   # Symlinks are checked unconditionally, and against the SAME source run_bootstrap
