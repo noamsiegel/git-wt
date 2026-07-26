@@ -232,3 +232,93 @@ _configure_ports() {
   [ -L "$FIX/wt_root/ABC-1-repair/deps/node_modules" ]
   [ "$(readlink "$FIX/wt_root/ABC-1-repair/deps/node_modules")" = "$FIX/canonical/deps/node_modules" ]
 }
+
+# --- wt bootstrap --check coverage --------------------------------------
+#
+# --check is what tooling keys off to decide whether a worktree needs
+# provisioning, so a finding it fails to report is worse than no check at all.
+
+_configure_linked_dir_and_symlink() {
+  _write_config "    worktree_symlinks:
+      - .envrc-personal"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].path = "deps/node_modules"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].source = "canonical"' "$WT_CONFIG"
+  wt doctor --install-hooks >/dev/null 2>&1 || true
+}
+
+@test "bootstrap --check reports a missing symlink even when linked_dirs exist" {
+  # The regression: the symlink checks used to be skipped entirely whenever any
+  # linked_dirs record was present, so a repo configuring both reported clean.
+  echo "personal" > "$FIX/canonical/.envrc-personal"
+  mkdir -p "$FIX/canonical/deps/node_modules"
+  _configure_linked_dir_and_symlink
+  wt new dev/ABC-1-check-symlink >/dev/null
+  rm -f "$FIX/wt_root/ABC-1-check-symlink/.envrc-personal"
+
+  run wt bootstrap --check ABC-1-check-symlink
+  [[ "$output" == *"symlink .envrc-personal"* ]]
+  [[ "$output" == *"WARN"* ]]
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap --check exits 0 on a fully provisioned worktree" {
+  echo "personal" > "$FIX/canonical/.envrc-personal"
+  mkdir -p "$FIX/canonical/deps/node_modules"
+  _configure_linked_dir_and_symlink
+  wt new dev/ABC-1-check-clean >/dev/null
+
+  run wt bootstrap --check ABC-1-check-clean
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"WARN"* ]]
+}
+
+@test "bootstrap --check exits non-zero for a missing linked dir" {
+  mkdir -p "$FIX/canonical/deps/node_modules"
+  _configure_linked_dir
+  wt new dev/ABC-1-check-linked >/dev/null
+  rm -f "$FIX/wt_root/ABC-1-check-linked/deps/node_modules"
+
+  run wt bootstrap --check ABC-1-check-linked
+  [[ "$output" == *"WARN (missing/not expected symlink)"* ]]
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap --check counts the stale-deps WARN" {
+  # This WARN was printed but never counted, which is the entire reason --check
+  # could display a finding and still exit 0. Command dispatch was never at fault.
+  mkdir -p "$FIX/canonical/deps/node_modules/.bin"
+  echo "vitest" > "$FIX/canonical/deps/node_modules/.bin/vitest"
+  echo "{}" > "$FIX/canonical/package.json"
+  _write_config ""
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].path = "deps/node_modules"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].source = "canonical"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].drift_files[0] = "package.json"' "$WT_CONFIG"
+  yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].required_paths[0] = ".bin/vitest"' "$WT_CONFIG"
+  wt doctor --install-hooks >/dev/null 2>&1 || true
+  wt new dev/ABC-1-check-stale >/dev/null
+  # Make the lockfile newer than the installed deps: that is what "stale" means.
+  touch "$FIX/canonical/package.json"
+
+  run wt bootstrap --check ABC-1-check-stale
+  [[ "$output" == *"canonical deps may be stale"* ]]
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap --check reads bootstrap.env.symlinks, not just the legacy key" {
+  # The health check used to read cfg_worktree_symlinks while run_bootstrap
+  # provisioned from cfg_bootstrap_env_symlinks, so a repo using the current
+  # bootstrap.env.symlinks key was never checked under any condition. Check and
+  # repair must agree on what should exist.
+  echo "personal" > "$FIX/canonical/.envrc-personal"
+  _write_config ""
+  yq -i '.repos.fixrepo.bootstrap.env.symlinks[0] = ".envrc-personal"' "$WT_CONFIG"
+  wt doctor --install-hooks >/dev/null 2>&1 || true
+  wt new dev/ABC-1-env-symlink >/dev/null
+  [ -e "$FIX/wt_root/ABC-1-env-symlink/.envrc-personal" ]
+  rm -f "$FIX/wt_root/ABC-1-env-symlink/.envrc-personal"
+
+  run wt bootstrap --check ABC-1-env-symlink
+  [[ "$output" == *"symlink .envrc-personal"* ]]
+  [[ "$output" == *"WARN"* ]]
+  [ "$status" -ne 0 ]
+}

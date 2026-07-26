@@ -325,6 +325,10 @@ wt bootstrap --check <id>
 wt doctor --worktree <id>
 ```
 
+`--check` reports one row per configured expectation and exits non-zero when any
+row is a `WARN`, so it is safe to gate tooling on its exit status. It checks the
+same sources `--repair` provisions from, including `bootstrap.env.symlinks`.
+
 `wt bootstrap --repair <id>` reruns idempotent bootstrap for existing
 worktrees. It recreates missing configured symlinks and generated ports; it
 does not install dependencies.
