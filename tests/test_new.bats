@@ -73,6 +73,51 @@ teardown() { wt_test_teardown; }
   rm -rf "$FIX/wt_root/.wt.lock"
 }
 
+@test "lock: an uncreatable worktree_root reports the real cause, not lock contention" {
+  # Regression: mkdir -p "$wt_root" was unchecked, so a permission-denied or
+  # read-only root fell through to the lock mkdir, which then failed for an
+  # unrelated reason and was reported as `locked by pid ?` - a lock that never
+  # existed. This blocked a sandboxed agent twice before anyone noticed.
+  : > "$FIX/blocker"                       # a FILE where a directory must go
+  yq -i '.repos.fixrepo.worktree_root = "'"$FIX"'/blocker/wt_root"' "$WT_CONFIG"
+
+  run wt new dev/ABC-1-unwritable-root
+  [ "$status" -eq 40 ]
+  [[ "$output" == *"cannot create worktree_root"* ]]
+  [[ "$output" != *"locked by pid"* ]]
+}
+
+@test "lock: a stale lock naming a dead pid says so" {
+  mkdir -p "$FIX/wt_root/.wt.lock"
+  echo 99999999 > "$FIX/wt_root/.wt.lock/pid"   # not running
+
+  run wt new dev/ABC-1-stale-lock
+  [ "$status" -eq 40 ]
+  [[ "$output" == *"not running"* ]]
+  [[ "$output" == *"wt repair"* ]]
+  rm -rf "$FIX/wt_root/.wt.lock"
+}
+
+@test "lock: a lock with no pid recorded is reported as such" {
+  mkdir -p "$FIX/wt_root/.wt.lock"             # no pid file written
+
+  run wt new dev/ABC-1-pidless-lock
+  [ "$status" -eq 40 ]
+  [[ "$output" == *"records no pid"* ]]
+  rm -rf "$FIX/wt_root/.wt.lock"
+}
+
+@test "lock: a live holder still reports plain contention" {
+  mkdir -p "$FIX/wt_root/.wt.lock"
+  echo $$ > "$FIX/wt_root/.wt.lock/pid"        # this test process is alive
+
+  run wt new dev/ABC-1-live-lock
+  [ "$status" -eq 40 ]
+  [[ "$output" == *"is locked by pid $$"* ]]
+  [[ "$output" != *"not running"* ]]
+  rm -rf "$FIX/wt_root/.wt.lock"
+}
+
 # ----- --repo flag and pattern-based inference -----
 
 @test "--repo flag selects target repo explicitly" {

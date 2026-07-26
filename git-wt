@@ -671,11 +671,28 @@ derive_id() {
 # ---------- locking ----------
 acquire_lock() {
   local wt_root="$1"
-  mkdir -p "$wt_root"
+  # An unwritable/uncreatable worktree_root must say so. Ignoring this mkdir left the
+  # next one failing for an unrelated reason, which was then reported as lock
+  # contention against "pid ?" - a lock that never existed. Blaming the wrong cause
+  # costs more than the original failure.
+  if ! mkdir -p "$wt_root" 2>/dev/null; then
+    die 40 "cannot create worktree_root $wt_root (permission denied or read-only path)"
+  fi
   local lock_dir="$wt_root/.wt.lock"
   if ! mkdir "$lock_dir" 2>/dev/null; then
+    # Only claim contention when a lock actually exists; otherwise this is a
+    # writability problem in a directory we can see but cannot modify.
+    if [[ ! -d "$lock_dir" ]]; then
+      die 40 "cannot create lock in worktree_root $wt_root (permission denied or read-only path)"
+    fi
     local locker
-    locker=$(cat "$lock_dir/pid" 2>/dev/null || echo "?")
+    locker=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+    if [[ -z "$locker" ]]; then
+      die 40 "worktree_root $wt_root is locked, but the lock records no pid (stale? try: wt repair)"
+    fi
+    if ! kill -0 "$locker" 2>/dev/null; then
+      die 40 "worktree_root $wt_root is locked by pid $locker, which is not running (stale lock; try: wt repair)"
+    fi
     die 40 "worktree_root $wt_root is locked by pid $locker"
   fi
   echo $$ > "$lock_dir/pid"
