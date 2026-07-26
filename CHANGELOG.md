@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — single-session worktree ownership
+
+### Added
+- `wt hook-run pre-commit` now enforces one agent session per worktree. Git serialises
+  branches across worktrees but not files *within* one, so two agent sessions sharing a
+  worktree silently overwrite each other's uncommitted work and can push onto a branch
+  mid-review with nothing in git to notice. The first session to commit claims the tree
+  (`$GIT_DIR/wt-session-owner`); a second live session is refused with the usual
+  `--no-verify` bypass. The claim records a pid as well as a session id, so a crashed
+  session's stale claim is taken over rather than locking the worktree permanently.
+  Inert without `WT_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` in the environment, so humans are
+  unaffected, and fail-open like the rest of `hook-run`. Motivation: observed in the wild —
+  two agent sessions in one worktree, one of them pushing onto a branch that was already
+  under review, discovered only because a diff contained a rename nobody in that session
+  had written.
+
 ## [v0.10.11] — per-repo autopush policy
 
 ### Added

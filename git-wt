@@ -2585,6 +2585,45 @@ Or upgrade manually by re-installing from https://github.com/noamsiegel/git-wt"
 
 # Pure, self-contained git-hook guardrail invoked by the per-repo dispatcher
 # (`wt hook-run <hook> [args]`). Fail-OPEN: any uncertainty exits 0 so a broken
+# One agent session per worktree. Returns 0 to allow the commit, 1 to refuse.
+#
+# Git serialises BRANCHES across worktrees but not FILES within one, so two agent
+# sessions sharing a worktree overwrite each other's uncommitted work and can push
+# onto a branch mid-review, with nothing in git to notice. wt is the only component
+# that sees every commit in every worktree, so the check belongs here.
+#
+# First session to commit claims the worktree. The claim records a pid as well as a
+# session id: when the owning process is gone the claim is stale and the next session
+# takes over, so a crashed session cannot lock a worktree permanently.
+#
+# Fail-OPEN like the rest of cmd_hook_run, and inert for humans -- no session id in
+# the environment means nothing to enforce.
+hook_guard_worktree_owner() {
+  local gd="$1" owner_file me owner_sid owner_pid
+  me="${WT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+  [[ -n "$me" ]] || return 0
+  owner_file="$gd/wt-session-owner"
+
+  if [[ -r "$owner_file" ]]; then
+    IFS=' ' read -r owner_sid owner_pid < "$owner_file" || true
+    if [[ -n "$owner_sid" && "$owner_sid" != "$me" && -n "$owner_pid" ]] \
+       && kill -0 "$owner_pid" 2>/dev/null; then
+      printf '\n%b\n' "$(red '=== wt: refusing to commit - worktree owned by another session ===')" >&2
+      printf ' worktree : %s\n' "$(rp "$(dirname "$gd")")" >&2
+      printf ' branch   : %s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" >&2
+      printf ' owner    : %s (pid %s, running)\n' "$owner_sid" "$owner_pid" >&2
+      printf ' this one : %s\n' "$me" >&2
+      printf '\n two sessions in one worktree overwrite each other and can push onto\n' >&2
+      printf ' a branch mid-review. work in your own worktree instead.\n' >&2
+      printf ' fix: wt new <branch>   (or ask which session owns this one)\n' >&2
+      printf '\n emergency bypass: git commit --no-verify\n\n' >&2
+      return 1
+    fi
+  fi
+  printf '%s %s\n' "$me" "${WT_SESSION_PID:-$PPID}" > "$owner_file" 2>/dev/null || true
+  return 0
+}
+
 # wt never blocks a commit/push. Runs before require_deps/require_config.
 cmd_hook_run() {
   local hook="${1:-}"; shift || true
@@ -2594,7 +2633,10 @@ cmd_hook_run() {
       local gd cd top repo cpath
       gd=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 0
       cd=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
-      [[ "$gd" == "$cd" ]] || exit 0   # in a worktree -> allow
+      if [[ "$gd" != "$cd" ]]; then   # in a worktree -> ownership check, then allow
+        hook_guard_worktree_owner "$gd" || exit 1
+        exit 0
+      fi
       top=$(rp "$(dirname "$cd")")
       for repo in $(cfg_repos 2>/dev/null); do
         cpath=$(rp "$(cfg_repo_get "$repo" path 2>/dev/null)")

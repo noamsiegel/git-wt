@@ -126,6 +126,67 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+# --- pre-commit: one agent session per worktree ------------------------
+#
+# Git serialises branches across worktrees but not files WITHIN one, so two agent
+# sessions sharing a worktree overwrite each other and can push onto a branch
+# mid-review with nothing in git to notice. These exercise the guardrail through
+# `wt hook-run`, which is precisely what the generated dispatcher invokes.
+
+@test "pre-commit: same session may commit repeatedly in its own worktree" {
+  wt_quick_new dev/ABC-1-own-twice
+  cd "$FIX/wt_root/ABC-1-own-twice"
+  CLAUDE_CODE_SESSION_ID=sess-A run wt hook-run pre-commit
+  [ "$status" -eq 0 ]
+  CLAUDE_CODE_SESSION_ID=sess-A run wt hook-run pre-commit
+  [ "$status" -eq 0 ]
+}
+
+@test "pre-commit: refuses a second live session in the same worktree" {
+  wt_quick_new dev/ABC-1-two-sessions
+  cd "$FIX/wt_root/ABC-1-two-sessions"
+  # sess-A claims the worktree, recording a pid that is certainly alive.
+  CLAUDE_CODE_SESSION_ID=sess-A WT_SESSION_PID=$$ run wt hook-run pre-commit
+  [ "$status" -eq 0 ]
+
+  CLAUDE_CODE_SESSION_ID=sess-B run wt hook-run pre-commit
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"owned by another session"* ]]
+  [[ "$output" == *"sess-A"* ]]
+  [[ "$output" == *"--no-verify"* ]]
+}
+
+@test "pre-commit: a stale claim from a dead session is taken over" {
+  wt_quick_new dev/ABC-1-stale-claim
+  cd "$FIX/wt_root/ABC-1-stale-claim"
+  gd=$(git rev-parse --path-format=absolute --git-dir)
+  # pid 99999999 is not running. Without the liveness check a crashed session
+  # would lock this worktree permanently and the guard would get disabled.
+  printf 'sess-DEAD 99999999\n' > "$gd/wt-session-owner"
+
+  CLAUDE_CODE_SESSION_ID=sess-NEW run wt hook-run pre-commit
+  [ "$status" -eq 0 ]
+  run cat "$gd/wt-session-owner"
+  [[ "$output" == *"sess-NEW"* ]]
+}
+
+@test "pre-commit: no session id means no ownership enforcement (humans)" {
+  wt_quick_new dev/ABC-1-human
+  cd "$FIX/wt_root/ABC-1-human"
+  gd=$(git rev-parse --path-format=absolute --git-dir)
+  printf 'sess-A %s\n' "$$" > "$gd/wt-session-owner"
+
+  run env -u CLAUDE_CODE_SESSION_ID -u WT_SESSION_ID wt hook-run pre-commit
+  [ "$status" -eq 0 ]
+}
+
+@test "pre-commit: canonical refusal still wins over ownership" {
+  cd "$FIX/canonical"
+  CLAUDE_CODE_SESSION_ID=sess-A run wt hook-run pre-commit
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"canonical"* ]]
+}
+
 @test "pre-commit: unconfigured repo passes through" {
   outside=$(mktemp -d)
   git init --quiet "$outside" && cd "$outside"
