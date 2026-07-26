@@ -283,12 +283,21 @@ _configure_linked_dir_and_symlink() {
   [ "$status" -ne 0 ]
 }
 
-@test "bootstrap --check counts the stale-deps WARN" {
-  # This WARN was printed but never counted, which is the entire reason --check
-  # could display a finding and still exit 0. Command dispatch was never at fault.
+@test "bootstrap --check reports stale canonical deps as INFO, not a finding" {
+  # This row describes the CANONICAL checkout's install being older than the
+  # lockfile. --repair cannot change it and it stays true until someone reinstalls
+  # there, so counting it as a WARN made --check permanently non-zero for every
+  # worktree of such a repo and destroyed its use as a provisioning gate.
+  #
+  # package.json is COMMITTED so the worktree has identical content and the drift
+  # row passes; that isolates the stale mtime comparison as the only finding.
   mkdir -p "$FIX/canonical/deps/node_modules/.bin"
   echo "vitest" > "$FIX/canonical/deps/node_modules/.bin/vitest"
   echo "{}" > "$FIX/canonical/package.json"
+  echo "deps/node_modules" > "$FIX/canonical/.gitignore"
+  git -C "$FIX/canonical" add package.json .gitignore
+  git -C "$FIX/canonical" commit --no-verify -q -m "add lockfile and ignore linked deps"
+  git -C "$FIX/canonical" push -q origin main
   _write_config ""
   yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].path = "deps/node_modules"' "$WT_CONFIG"
   yq -i '.repos.fixrepo.bootstrap.linked_dirs[0].source = "canonical"' "$WT_CONFIG"
@@ -301,7 +310,9 @@ _configure_linked_dir_and_symlink() {
 
   run wt bootstrap --check ABC-1-check-stale
   [[ "$output" == *"canonical deps may be stale"* ]]
-  [ "$status" -ne 0 ]
+  [[ "$output" != *"WARN (canonical deps may be stale)"* ]]
+  [[ "$output" != *"WARN"* ]]
+  [ "$status" -eq 0 ]
 }
 
 @test "bootstrap --check reads bootstrap.env.symlinks, not just the legacy key" {
